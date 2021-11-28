@@ -2,6 +2,7 @@
 use std::convert::{TryFrom};
 use crate::error::{LiellaError as Error, LiellaResult as Result};
 
+#[derive(Clone, Debug, Hash)]
 pub struct SpirvHeader {
     pub magic: u32,
     pub version: u32,
@@ -26,12 +27,46 @@ impl TryFrom<&[u32]> for SpirvHeader {
 
 
 pub type OpCode = u32;
+pub type SpvId = u32;
 
 
 
 pub struct Instr<'a> {
-    pub opcode: OpCode,
-    pub operands: &'a [u32],
+    opcode: OpCode,
+    operands: &'a [u32],
+}
+impl<'a> Instr<'a> {
+    pub fn opcode(&self) -> OpCode {
+        self.opcode
+    }
+    pub fn operands(&self) -> Operands<'a> {
+        Operands {
+            inner: self.operands.iter().peekable()
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.operands.len() + 1
+    }
+}
+pub struct Operands<'a> {
+    inner: std::iter::Peekable<std::slice::Iter<'a, u32>>,
+}
+impl<'a> Iterator for Operands<'a> {
+    type Item = u32;
+    fn next(&mut self) -> Option<u32> {
+        self.inner.next().copied()
+    }
+}
+impl<'a> Operands<'a> {
+    pub fn u32(&mut self) -> u32 {
+        self.next().unwrap()
+    }
+    pub fn id(&mut self) -> SpvId {
+        self.next().unwrap() as SpvId
+    }
+    pub fn ate(&mut self) -> bool {
+        self.inner.peek().is_none()
+    }
 }
 
 pub struct Spv<'a> {
@@ -59,7 +94,7 @@ impl<'a> TryFrom<&'a [u32]> for Spv<'a> {
             let opcode = instr_header & 0xFFFF;
 
             let next_i = i + instr_len as usize;
-            let operands: &'a [u32] = &words[i..next_i];
+            let operands: &'a [u32] = &words[(i + 1)..next_i];
             let instr = Instr { opcode, operands };
             instrs.push(instr);
 
