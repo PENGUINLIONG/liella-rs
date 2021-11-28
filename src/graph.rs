@@ -1,15 +1,69 @@
-use core::convert::TryFrom;
+use std::convert::TryFrom;
 use std::ops::{Deref, DerefMut};
 use std::rc::{Rc, Weak};
+use std::fmt;
 use crate::spirv::{Instruction, OpCode, Spirv};
 use crate::error::{LiellaError as Error, LiellaResult as Result};
+
+fn make_block_name<'a>(inner: &Rc<BlockInner<'a>>) -> String {
+    format!("Block@{:016x}", (Rc::as_ptr(inner) as *const BlockInner<'a>) as usize)
+}
+fn make_block_name_weak<'a>(inner: &Weak<BlockInner<'a>>) -> String {
+    inner.upgrade()
+        .map(|x| make_block_name(&x))
+        .unwrap_or("Block@DROPPED".to_owned())
+}
 
 pub struct BlockInner<'a> {
     instrs: &'a [Instruction],
 }
-pub struct Block<'a>(Rc<BlockInner<'a>>);
-pub struct BlockRef<'a>(Weak<BlockInner<'a>>);
+impl<'a> BlockInner<'a> {
+    pub fn instrs(&self) -> &'a [Instruction] {
+        &self.instrs
+    }
+}
 
+#[derive(Clone)]
+pub struct Block<'a>(Rc<BlockInner<'a>>);
+impl<'a> Deref for Block<'a> {
+    type Target = BlockInner<'a>;
+    fn deref(&self) -> &BlockInner<'a> {
+        self.0.deref()
+    }
+}
+impl<'a> DerefMut for Block<'a> {
+    fn deref_mut(&mut self) -> &mut BlockInner<'a> {
+        Rc::get_mut(&mut self.0).unwrap()
+    }
+}
+impl<'a> Block<'a> {
+    pub fn downgrade(self) -> BlockRef<'a> {
+        let out = Rc::downgrade(&self.0);
+        BlockRef(out)
+    }
+}
+impl<'a> fmt::Debug for Block<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct(&make_block_name(&self.0))
+            .field("instrs", &self.instrs)
+            .finish()
+    }
+}
+
+pub struct BlockRef<'a>(Weak<BlockInner<'a>>);
+impl<'a> BlockRef<'a> {
+    pub fn upgrade(self) -> Option<Block<'a>> {
+        let out = self.0.upgrade();
+        out.map(|x| Block(x))
+    }
+}
+impl<'a> fmt::Debug for BlockRef<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(&make_block_name_weak(&self.0))
+    }
+}
+
+#[derive(Debug)]
 pub struct FunctionGraph<'a> {
     blocks: Vec<Block<'a>>,
 }
@@ -19,6 +73,7 @@ impl<'a> FunctionGraph<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct SpirvGraph<'a> {
     subgraphs: Vec<FunctionGraph<'a>>,
 }

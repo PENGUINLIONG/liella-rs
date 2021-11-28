@@ -13,6 +13,17 @@ pub type OpCode = crate::spv::OpCode;
 
 type SpvId = crate::spv::SpvId;
 
+fn make_instr_name(inner: &Rc<InstructionInner>) -> String {
+    format!("{}@{:016x}",
+        gen::opcode2name(inner.opcode),
+        Rc::as_ptr(inner) as *const InstructionInner as usize)
+}
+fn make_instr_name_weak(inner: &Weak<InstructionInner>) -> String {
+    inner.upgrade()
+        .map(|x| make_instr_name(&x))
+        .unwrap_or("Instruction@DROPPED".to_owned())
+}
+
 #[derive(Clone)]
 pub enum Operand {
     Literal(u32),
@@ -24,13 +35,12 @@ impl fmt::Debug for Operand {
         use Operand::*;
         match self {
             Literal(x) => x.fmt(f),
-            Instruction(x) => write!(f, "0x{:016x}", Weak::as_ptr(&x.0) as usize),
+            Instruction(x) => f.write_str(&make_instr_name_weak(&x.0)),
             ResultPlaceholder => write!(f, "<result>"),
         }
     }
 }
 
-#[derive(Debug)]
 pub struct InstructionInner {
     opcode: OpCode,
     operands: Vec<Operand>,
@@ -46,25 +56,41 @@ impl InstructionInner {
         self.operands.len() + 1
     }
 }
-#[derive(Clone, Debug)]
+
+#[derive(Clone)]
 pub struct Instruction(Rc<InstructionInner>);
 impl Deref for Instruction {
     type Target = InstructionInner;
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 impl DerefMut for Instruction {
-    fn deref_mut(&mut self) -> &mut Self::Target { Rc::get_mut(&mut self.0).unwrap() }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Rc::get_mut(&mut self.0).unwrap()
+    }
 }
 impl Instruction {
     pub fn downgrade(self) -> InstructionRef {
         InstructionRef(Rc::downgrade(&self.0))
     }
 }
-#[derive(Clone, Debug)]
+impl fmt::Debug for Instruction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct(&make_instr_name(&self.0))
+            .field("operands", &self.operands)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct InstructionRef(Weak<InstructionInner>);
 impl InstructionRef {
     pub fn upgrade(self) -> Option<Instruction> {
         self.0.upgrade().map(|x| Instruction(x))
+    }
+}
+impl fmt::Debug for InstructionRef {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(&make_instr_name_weak(&self.0))
     }
 }
 
