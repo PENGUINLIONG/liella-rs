@@ -21,6 +21,12 @@ impl<'a> BlockInner<'a> {
     pub fn instrs(&self) -> &'a [Instruction] {
         &self.instrs
     }
+    pub fn label_instr(&self) -> &'a Instruction {
+        self.instrs.first().unwrap()
+    }
+    pub fn branch_instr(&self) -> &'a Instruction {
+        self.instrs.last().unwrap()
+    }
 }
 
 #[derive(Clone)]
@@ -49,7 +55,14 @@ impl<'a> fmt::Debug for Block<'a> {
             .finish()
     }
 }
+impl<'a> PartialEq for Block<'a> {
+    fn eq(&self, b: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &b.0)
+    }
+}
+impl<'a> Eq for Block<'a> {}
 
+#[derive(Clone)]
 pub struct BlockRef<'a>(Weak<BlockInner<'a>>);
 impl<'a> BlockRef<'a> {
     pub fn upgrade(self) -> Option<Block<'a>> {
@@ -64,12 +77,47 @@ impl<'a> fmt::Debug for BlockRef<'a> {
 }
 
 #[derive(Debug)]
+pub struct FunctionGraphEdge<'a> {
+    src: BlockRef<'a>,
+    dst: BlockRef<'a>,
+}
+fn collect_edges<'a>(blocks: &[Block<'a>]) -> Result<Vec<FunctionGraphEdge<'a>>> {
+    use crate::spirv::Operand;
+
+    const OP_LABEL: OpCode = 248;
+
+    let mut out = Vec::new();
+    for block in blocks.iter() {
+        let src = block.clone().downgrade();
+        for operand in block.branch_instr().operands() {
+            if let Operand::Instruction(dst_label) = operand {
+                let dst_label = dst_label.clone().upgrade().unwrap();
+                if dst_label.opcode() == OP_LABEL {
+                    let dst = blocks.iter()
+                        .find(|x| x.label_instr() == &dst_label)
+                        .ok_or(Error::UNEXPECTED_OP)?
+                        .clone()
+                        .downgrade();
+                    let edge = FunctionGraphEdge { src: src.clone(), dst };
+                    out.push(edge);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Debug)]
 pub struct FunctionGraph<'a> {
     blocks: Vec<Block<'a>>,
+    edges: Vec<FunctionGraphEdge<'a>>,
 }
 impl<'a> FunctionGraph<'a> {
     pub fn blocks(&self) -> &[Block<'a>] {
         &self.blocks
+    }
+    pub fn edges(&self) -> &[FunctionGraphEdge<'a>] {
+        &self.edges
     }
 }
 
@@ -89,34 +137,35 @@ fn parse_grpah<'a>(spv: &'a Spirv) -> Result<SpirvGraph<'a>> {
     const OP_LABEL: OpCode = 248;
 
     let mut fns: Vec<FunctionGraph<'a>> = Vec::new();
-    let mut cur_fn: Option<FunctionGraph<'a>> = None;
+    let mut cur_blocks: Option<Vec<Block<'a>>> = None;
     let mut cur_block_beg: Option<usize> = None;
 
     for (i, instr) in spv.instrs().iter().enumerate() {
         match instr.opcode() {
             OP_FUNCTION => {
-                if cur_fn.is_some() { return Err(Error::UNEXPECTED_OP); }
-                let f = FunctionGraph { blocks: Default::default() };
-                cur_fn = Some(f);
+                if cur_blocks.is_some() { return Err(Error::UNEXPECTED_OP); }
+                cur_blocks = Some(Default::default());
             },
             OP_FUNCTION_END => {
-                if let Some(mut f) = cur_fn.take() {
+                if let Some(mut blocks) = cur_blocks.take() {
                     if let Some(beg) = cur_block_beg.take() {
                         let inner = BlockInner { instrs: &spv.instrs()[beg..i] };
                         let block = Block(Rc::new(inner));
-                        f.blocks.push(block);
+                        blocks.push(block);
                     }
+                    let edges = collect_edges(&blocks)?;
+                    let f = FunctionGraph { blocks, edges };
                     fns.push(f);
                 } else {
                     return Err(Error::UNEXPECTED_OP);
                 }
             },
             OP_LABEL => {
-                if let Some(f) = cur_fn.as_mut() {
+                if let Some(blocks) = cur_blocks.as_mut() {
                     if let Some(beg) = cur_block_beg.take() {
                         let inner = BlockInner { instrs: &spv.instrs()[beg..i] };
                         let block = Block(Rc::new(inner));
-                        f.blocks.push(block);
+                        blocks.push(block);
                     }
                 } else {
                     return Err(Error::UNEXPECTED_OP);

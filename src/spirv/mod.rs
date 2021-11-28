@@ -1,4 +1,5 @@
 use std::ops::{Deref, DerefMut};
+use std::cmp::{PartialEq, Eq};
 use std::rc::{Rc, Weak};
 use std::fmt;
 use std::collections::HashMap;
@@ -80,6 +81,12 @@ impl fmt::Debug for Instruction {
             .finish()
     }
 }
+impl PartialEq for Instruction {
+    fn eq(&self, b: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &b.0)
+    }
+}
+impl Eq for Instruction {}
 
 #[derive(Clone)]
 pub struct InstructionRef(Weak<InstructionInner>);

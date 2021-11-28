@@ -10,7 +10,9 @@ fn main() {
         layout(location=0) in int pred;
         layout(location=0) out int ans;
         void main() {
-            if (pred > 0) { ans = 0; } else { ans = 1; }
+            for (int i = pred; i < 5; ++i) {
+                ans += pred;
+            }
         }
     "#, vert, vulkan1_0);
     let spv = Spv::try_from(spv).unwrap();
