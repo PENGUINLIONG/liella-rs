@@ -13,6 +13,8 @@ impl LiellaError {
     pub const INCOMPLETE_INSTR: LiellaError = CorruptedSpirv("incomplete instruction");
     pub const RESULT_ID_COLLISION: LiellaError = CorruptedSpirv("result id collision");
     pub const RESULT_ID_MISSING: LiellaError = CorruptedSpirv("result id missing");
+    pub const UNEXPECTED_OP: LiellaError = CorruptedSpirv("unexpected op");
+    pub const UNUSUAL_REFERENCE_COMPLEXITY: LiellaError = CorruptedSpirv("unusual reference complexity");
 
     pub const UNSUPPORTED_OP: LiellaError = UnsupportedSpirv("unsupported op");
 }

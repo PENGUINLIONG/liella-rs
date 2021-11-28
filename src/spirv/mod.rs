@@ -36,6 +36,12 @@ pub struct InstructionInner {
     operands: Vec<Operand>,
 }
 impl InstructionInner {
+    pub fn opcode(&self) -> OpCode {
+        self.opcode
+    }
+    pub fn operands(&self) -> &[Operand] {
+        &self.operands
+    }
     pub fn len(&self) -> usize {
         self.operands.len() + 1
     }
@@ -74,8 +80,16 @@ impl SpirvDeserializer {
             id_map: HashMap::new(),
         }
     }
-    fn get_instr_by_id(&self, id: SpvId) -> &Option<Instruction> {
-        &self.instrs[id as usize]
+    fn get_instr_by_id(&self, id: SpvId) -> Option<&Instruction> {
+        if let Some(idx) = self.id_map.get(&id) {
+            if let Some(instr) = self.instrs.get(*idx as usize) {
+                instr.as_ref()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
     fn deserialize_instr(
         &mut self,
@@ -140,12 +154,16 @@ impl<'a> InstructionBuilder<'a> {
 }
 fn deserialize_instrs(instrs: &[Instr]) -> Result<Vec<Instruction>> {
     let mut de = SpirvDeserializer::new(instrs.len());
-    loop {
-        let mut done = true;
+    let mut done = true;
+    for _ in 0..100 {
+        done = true;
         for (i, instr) in instrs.iter().enumerate() {
             done &= de.deserialize_instr(i, instr)?;
         }
         if done { break; }
+    }
+    if !done {
+        return Err(Error::UNUSUAL_REFERENCE_COMPLEXITY);
     }
     let out = de.instrs.into_iter().map(|x| x.unwrap()).collect();
     Ok(out)
@@ -189,11 +207,8 @@ mod tests {
         // There should be a same numbder of instructions emitted.
         assert_eq!(operand_lens1.len(), operand_lens2.len());
         // Also the same number of operands converted for each instruction.
-        let mut i = 0;
         for (a, b) in operand_lens1.iter().zip(operand_lens2.iter()) {
-            println!("{}, {}", i, spv.instrs()[i].opcode);
             assert_eq!(a, b);
-            i += 1;
         }
     }
 }
