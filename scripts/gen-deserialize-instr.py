@@ -94,21 +94,23 @@ COLLECT_ID_REFS = {
     "header": [
         "use crate::spirv::{Instruction, InstructionBuilder, SpirvDeserializer};\n",
         "use crate::spv::{SpvId, Instr};\n",
+        "use crate::error::{LiellaError as Error, LiellaResult as Result};"
         "\n",
         "pub(crate) fn deserialize_instr(\n",
         "  ctxt: &mut SpirvDeserializer,\n"
         "  instr: &Instr,\n",
-        ") -> Option<(SpvId, Instruction)> {\n",
+        ") -> Result<Option<(SpvId, Instruction)>> {\n",
         "  let mut it = instr.operands();\n",
         "  let mut ib = InstructionBuilder::new(ctxt, instr.opcode());\n",
         "  let mut result_id: u32 = 0;\n",
         "  match instr.opcode() {\n",
     ],
     "footer": [
-        "    _ => return None,\n"
+        "    _ => return Err(Error::UNSUPPORTED_OP),\n"
         "  }\n",
         "  while let Some(w) = it.next() { ib.lit(w); }\n"
-        "  ib.build().map(|x| (result_id, x))\n",
+        "  let out = ib.build().map(|x| (result_id, x));\n",
+        "  Ok(out)\n"
         "}\n",
     ],
     "kind": {

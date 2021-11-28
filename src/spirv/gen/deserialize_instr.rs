@@ -2,11 +2,11 @@
 //! @PENGUINLIONG
 use crate::spirv::{Instruction, InstructionBuilder, SpirvDeserializer};
 use crate::spv::{SpvId, Instr};
-
+use crate::error::{LiellaError as Error, LiellaResult as Result};
 pub(crate) fn deserialize_instr(
   ctxt: &mut SpirvDeserializer,
   instr: &Instr,
-) -> Option<(SpvId, Instruction)> {
+) -> Result<Option<(SpvId, Instruction)>> {
   let mut it = instr.operands();
   let mut ib = InstructionBuilder::new(ctxt, instr.opcode());
   let mut result_id: u32 = 0;
@@ -4155,8 +4155,9 @@ pub(crate) fn deserialize_instr(
         ib.id(it.id());
       }
     },
-    _ => return None,
+    _ => return Err(Error::UNSUPPORTED_OP),
   }
   while let Some(w) = it.next() { ib.lit(w); }
-  ib.build().map(|x| (result_id, x))
+  let out = ib.build().map(|x| (result_id, x));
+  Ok(out)
 }

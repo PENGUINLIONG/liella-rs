@@ -84,7 +84,7 @@ impl SpirvDeserializer {
     ) -> Result<bool> {
         use std::collections::hash_map::Entry;
         if self.instrs[idx].is_some() { return Ok(true); }
-        if let Some((id, instr)) = gen::deserialize_instr(self, raw_instr) {
+        if let Some((id, instr)) = gen::deserialize_instr(self, raw_instr)? {
             self.instrs[idx] = Some(instr);
             if id != 0 {
                 match self.id_map.entry(id) {
