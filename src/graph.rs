@@ -76,10 +76,10 @@ impl<'a> fmt::Debug for BlockRef<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FunctionGraphEdge<'a> {
-    src: BlockRef<'a>,
-    dst: BlockRef<'a>,
+    pub src: BlockRef<'a>,
+    pub dst: BlockRef<'a>,
 }
 fn collect_edges<'a>(blocks: &[Block<'a>]) -> Result<Vec<FunctionGraphEdge<'a>>> {
     use crate::spirv::Operand;
