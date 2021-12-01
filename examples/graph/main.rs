@@ -66,4 +66,5 @@ fn main() {
     let spv = Spirv::try_from(spv).unwrap();
     let graph = SpirvGraph::try_from(&spv).unwrap();
     print_graphviz_py(&graph);
+    println!("{:#?}", graph.subgraphs());
 }

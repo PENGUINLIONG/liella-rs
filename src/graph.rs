@@ -75,6 +75,12 @@ impl<'a> fmt::Debug for BlockRef<'a> {
         f.write_str(&make_block_name_weak(&self.0))
     }
 }
+impl<'a> PartialEq for BlockRef<'a> {
+    fn eq(&self, b: &Self) -> bool {
+        self.0.ptr_eq(&b.0)
+    }
+}
+impl<'a> Eq for BlockRef<'a> {}
 
 #[derive(Clone, Debug)]
 pub struct FunctionGraphEdge<'a> {
@@ -107,10 +113,66 @@ fn collect_edges<'a>(blocks: &[Block<'a>]) -> Result<Vec<FunctionGraphEdge<'a>>>
     Ok(out)
 }
 
+#[derive(Clone, Debug)]
+pub struct FunctionGraphLoop<'a> {
+    pub edges: Vec<FunctionGraphEdge<'a>>,
+}
+fn collect_loops_impl<'a>(
+    edges: &[FunctionGraphEdge<'a>],
+    block_stack: &mut Vec<BlockRef<'a>>,
+    out: &mut Vec<FunctionGraphLoop<'a>>,
+) {
+    let src_block = block_stack.last().unwrap().clone();
+    let dst_blocks = edges.iter()
+        .filter_map(|x| {
+            if &x.src == &src_block {
+                Some(x.dst.clone())
+            } else {
+                None
+            }
+        });
+    for dst_block in dst_blocks {
+        let mut is_back_edge = false;
+        for (i, ancester_block) in block_stack.iter().enumerate() {
+            if ancester_block == &dst_block {
+                // One of the ancester is the destination block of this edge.
+                // The current edge is an back edge.
+                let loop_edges = block_stack[i..].windows(2)
+                    .map(|pair| FunctionGraphEdge {
+                        src: pair[0].clone(),
+                        dst: pair[1].clone(),
+                    })
+                    .chain([FunctionGraphEdge {
+                        src: src_block.clone(),
+                        dst: dst_block.clone(),
+                    }])
+                    .collect::<Vec<_>>();
+                out.push(FunctionGraphLoop { edges: loop_edges });
+                is_back_edge = true;
+                break;
+            }
+        }
+
+        block_stack.push(dst_block.clone());
+        if !is_back_edge {
+            collect_loops_impl(edges, block_stack, out);
+        }
+        block_stack.pop();
+    }
+}
+fn collect_loops<'a>(edges: &[FunctionGraphEdge<'a>]) -> Vec<FunctionGraphLoop<'a>> {
+    if edges.is_empty() { return Default::default(); }
+    let mut block_stack = vec![edges[0].src.clone()];
+    let mut out = Vec::new();
+    collect_loops_impl(edges, &mut block_stack, &mut out);
+    out
+}
+
 #[derive(Debug)]
 pub struct FunctionGraph<'a> {
     blocks: Vec<Block<'a>>,
     edges: Vec<FunctionGraphEdge<'a>>,
+    loops: Vec<FunctionGraphLoop<'a>>,
 }
 impl<'a> FunctionGraph<'a> {
     pub fn blocks(&self) -> &[Block<'a>] {
@@ -118,6 +180,9 @@ impl<'a> FunctionGraph<'a> {
     }
     pub fn edges(&self) -> &[FunctionGraphEdge<'a>] {
         &self.edges
+    }
+    pub fn loops(&self) -> &[FunctionGraphLoop<'a>] {
+        &self.loops
     }
 }
 
@@ -154,7 +219,8 @@ fn parse_grpah<'a>(spv: &'a Spirv) -> Result<SpirvGraph<'a>> {
                         blocks.push(block);
                     }
                     let edges = collect_edges(&blocks)?;
-                    let f = FunctionGraph { blocks, edges };
+                    let loops = collect_loops(&edges);
+                    let f = FunctionGraph { blocks, edges, loops };
                     fns.push(f);
                 } else {
                     return Err(Error::UNEXPECTED_OP);

@@ -185,12 +185,23 @@ impl<'a> InstructionBuilder<'a> {
         self.inner.map(|x| Instruction(Rc::new(x)))
     }
 }
+fn is_line_debug_instr(instr: &Instr) -> bool {
+    const OP_LINE: u32 = 8;
+    const OP_NO_LINE: u32 = 317;
+    match instr.opcode() {
+        OP_LINE | OP_NO_LINE => true,
+        _ => false,
+    }
+}
 fn deserialize_instrs(instrs: &[Instr]) -> Result<Vec<Instruction>> {
     let mut de = SpirvDeserializer::new(instrs.len());
     let mut done = true;
     for _ in 0..100 {
         done = true;
         for (i, instr) in instrs.iter().enumerate() {
+            // Ignore some in-function debug instructions because they can show
+            // up before `OpLabel` which break other processing.
+            if is_line_debug_instr(instr) { continue; }
             done &= de.deserialize_instr(i, instr)?;
         }
         if done { break; }
@@ -198,7 +209,7 @@ fn deserialize_instrs(instrs: &[Instr]) -> Result<Vec<Instruction>> {
     if !done {
         return Err(Error::UNUSUAL_REFERENCE_COMPLEXITY);
     }
-    let out = de.instrs.into_iter().map(|x| x.unwrap()).collect();
+    let out = de.instrs.into_iter().filter_map(|x| x).collect();
     Ok(out)
 }
 
