@@ -5,6 +5,10 @@ use std::fmt;
 use crate::spirv::{Instruction, OpCode, Spirv};
 use crate::error::{LiellaError as Error, LiellaResult as Result};
 
+const OP_FUNCTION: OpCode = 54;
+const OP_FUNCTION_END: OpCode = 56;
+const OP_LABEL: OpCode = 248;
+
 fn make_block_name<'a>(inner: &Rc<BlockInner<'a>>) -> String {
     format!("Block@{:016x}", (Rc::as_ptr(inner) as *const BlockInner<'a>) as usize)
 }
@@ -90,8 +94,6 @@ pub struct FunctionGraphEdge<'a> {
 fn collect_edges<'a>(blocks: &[Block<'a>]) -> Result<Vec<FunctionGraphEdge<'a>>> {
     use crate::spirv::Operand;
 
-    const OP_LABEL: OpCode = 248;
-
     let mut out = Vec::new();
     for block in blocks.iter() {
         let src = block.clone().downgrade();
@@ -115,13 +117,21 @@ fn collect_edges<'a>(blocks: &[Block<'a>]) -> Result<Vec<FunctionGraphEdge<'a>>>
 
 #[derive(Clone, Debug)]
 pub struct FunctionGraphLoop<'a> {
-    pub edges: Vec<FunctionGraphEdge<'a>>,
+    /// Edges from the back edge destination to the conditional-branch block.
+    /// This ought to be empty if there is no conditional branch in loop, i.e.,
+    /// an infinite loop.
+    pub header_edges: Vec<FunctionGraphEdge<'a>>,
+    /// Edges from the conditional-branch block to the destination of a back
+    /// edge. The back edge is at the end of `body_edges`.
+    pub body_edges: Vec<FunctionGraphEdge<'a>>,
 }
 fn collect_loops_impl<'a>(
     edges: &[FunctionGraphEdge<'a>],
     block_stack: &mut Vec<BlockRef<'a>>,
     out: &mut Vec<FunctionGraphLoop<'a>>,
 ) {
+    use crate::spirv::Operand;
+
     let src_block = block_stack.last().unwrap().clone();
     let dst_blocks = edges.iter()
         .filter_map(|x| {
@@ -137,7 +147,7 @@ fn collect_loops_impl<'a>(
             if ancester_block == &dst_block {
                 // One of the ancester is the destination block of this edge.
                 // The current edge is an back edge.
-                let loop_edges = block_stack[i..].windows(2)
+                let mut loop_edges = block_stack[i..].windows(2)
                     .map(|pair| FunctionGraphEdge {
                         src: pair[0].clone(),
                         dst: pair[1].clone(),
@@ -147,7 +157,35 @@ fn collect_loops_impl<'a>(
                         dst: dst_block.clone(),
                     }])
                     .collect::<Vec<_>>();
-                out.push(FunctionGraphLoop { edges: loop_edges });
+                // We assume the header edges ends at the first conditional
+                // branch, which include all branches with multiple (more than
+                // one) destinations.
+                // TODO: (penguinliong) Need another pass to merge same-source
+                // loops which have been split off because of branches in the
+                // header. In such case the loop header should end after the first conditional branch
+                let icond_edge = loop_edges.iter()
+                    .position(|x| {
+                        let src_block = x.src.clone().upgrade().unwrap();
+                        let ndst = src_block.instrs.last()
+                            .unwrap()
+                            .operands()
+                            .iter()
+                            .filter(|x| {
+                                if let Operand::Instruction(instr) = x {
+                                    let instr = instr.clone().upgrade().unwrap();
+                                    instr.opcode() == OP_LABEL
+                                } else {
+                                    false
+                                }
+                            })
+                            .count();
+                        ndst > 1
+                    })
+                    .unwrap_or(0);
+                let body_edges = loop_edges.split_off(icond_edge);
+                loop_edges.shrink_to_fit();
+                let header_edges = loop_edges;
+                out.push(FunctionGraphLoop { header_edges, body_edges });
                 is_back_edge = true;
                 break;
             }
@@ -197,10 +235,6 @@ impl<'a> SpirvGraph<'a> {
 }
 
 fn parse_grpah<'a>(spv: &'a Spirv) -> Result<SpirvGraph<'a>> {
-    const OP_FUNCTION: OpCode = 54;
-    const OP_FUNCTION_END: OpCode = 56;
-    const OP_LABEL: OpCode = 248;
-
     let mut fns: Vec<FunctionGraph<'a>> = Vec::new();
     let mut cur_blocks: Option<Vec<Block<'a>>> = None;
     let mut cur_block_beg: Option<usize> = None;
