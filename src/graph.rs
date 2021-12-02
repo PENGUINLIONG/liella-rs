@@ -2,15 +2,17 @@ use std::convert::TryFrom;
 use std::ops::{Deref, DerefMut};
 use std::rc::{Rc, Weak};
 use std::fmt;
-use crate::spirv::{Instruction, OpCode, Spirv};
+use crate::spirv::{Instruction, InstructionRef, OpCode, Operand, Spirv};
 use crate::error::{LiellaError as Error, LiellaResult as Result};
 
+const OP_STORE: OpCode = 62;
 const OP_FUNCTION: OpCode = 54;
 const OP_FUNCTION_END: OpCode = 56;
 const OP_LABEL: OpCode = 248;
 
 fn make_block_name<'a>(inner: &Rc<BlockInner<'a>>) -> String {
-    format!("Block@{:016x}", (Rc::as_ptr(inner) as *const BlockInner<'a>) as usize)
+    format!("Block@{:016x}",
+        (Rc::as_ptr(inner) as *const BlockInner<'a>) as usize)
 }
 fn make_block_name_weak<'a>(inner: &Weak<BlockInner<'a>>) -> String {
     inner.upgrade()
@@ -91,9 +93,9 @@ pub struct FunctionGraphEdge<'a> {
     pub src: BlockRef<'a>,
     pub dst: BlockRef<'a>,
 }
-fn collect_edges<'a>(blocks: &[Block<'a>]) -> Result<Vec<FunctionGraphEdge<'a>>> {
-    use crate::spirv::Operand;
-
+fn collect_edges<'a>(
+    blocks: &[Block<'a>]
+) -> Result<Vec<FunctionGraphEdge<'a>>> {
     let mut out = Vec::new();
     for block in blocks.iter() {
         let src = block.clone().downgrade();
@@ -115,8 +117,54 @@ fn collect_edges<'a>(blocks: &[Block<'a>]) -> Result<Vec<FunctionGraphEdge<'a>>>
     Ok(out)
 }
 
+fn find_itervar(instr: Instruction) -> Option<Instruction> {
+    if instr.opcode() == OP_STORE {
+        let operands = instr.operands();
+        let candidate = operands[0].as_instr().and_then(|x| x.upgrade())?;
+        let value = operands[1].as_instr().and_then(|x| x.upgrade())?;
+        if find_itervar_impl(&candidate, &value) {
+            Some(candidate)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+fn find_itervar_impl(candidate: &Instruction, instr: &Instruction) -> bool {
+    if candidate == instr {
+        true
+    } else {
+        instr.operands().iter()
+            .any(|x| {
+                if let Some(child_instr) = x.as_instr() {
+                    let child_instr = child_instr.clone().upgrade().unwrap();
+                    find_itervar_impl(candidate, &child_instr)
+                } else {
+                    false
+                }
+            })
+    }
+}
+fn find_itervars(instrs: &[Instruction]) -> Vec<Instruction> {
+    instrs.iter()
+        .filter_map(|x| find_itervar(x.clone()))
+        .collect::<Vec<_>>()
+}
+
 #[derive(Clone, Debug)]
 pub struct FunctionGraphLoop<'a> {
+    /// Definition of iteration variable instruction:
+    /// 1. Autonomously mutate inside a loop, forming a dynamic system of its
+    ///    own; thus can conclude a recursive function for each itervar.
+    /// 2. Exert a force to drive mutation of other variables/states.
+    /// 3. Atomic variables are NEVER itervars, because their mutation are not
+    ///    guaranteed.
+    ///
+    /// In our SPIR-V case, an `OpStore` of variable using an `OpLoad`ed value
+    /// from that same variable makes an itervar. Other variables referred to
+    /// the itervar receives a driving force to mutate.
+    pub itervars: Vec<InstructionRef>,
     /// Edges from the back edge destination to the conditional-branch block.
     /// This ought to be empty if there is no conditional branch in loop, i.e.,
     /// an infinite loop.
@@ -125,13 +173,21 @@ pub struct FunctionGraphLoop<'a> {
     /// edge. The back edge is at the end of `body_edges`.
     pub body_edges: Vec<FunctionGraphEdge<'a>>,
 }
+impl<'a> FunctionGraphLoop<'a> {
+    pub fn selection_block(&self) -> Option<Block> {
+        self.header_edges.last()
+            .and_then(|x| x.dst.clone().upgrade())
+    }
+    pub fn selection_instr(&self) -> Option<Instruction> {
+        self.selection_block()
+            .and_then(|x| x.instrs().last().cloned())
+    }
+}
 fn collect_loops_impl<'a>(
     edges: &[FunctionGraphEdge<'a>],
     block_stack: &mut Vec<BlockRef<'a>>,
     out: &mut Vec<FunctionGraphLoop<'a>>,
 ) {
-    use crate::spirv::Operand;
-
     let src_block = block_stack.last().unwrap().clone();
     let dst_blocks = edges.iter()
         .filter_map(|x| {
@@ -145,6 +201,13 @@ fn collect_loops_impl<'a>(
         let mut is_back_edge = false;
         for (i, ancester_block) in block_stack.iter().enumerate() {
             if ancester_block == &dst_block {
+                let itervars = block_stack[i..].iter()
+                    .flat_map(|x| {
+                        let block = x.clone().upgrade().unwrap();
+                        find_itervars(block.instrs())
+                    })
+                    .map(|x| x.downgrade())
+                    .collect::<Vec<_>>();
                 // One of the ancester is the destination block of this edge.
                 // The current edge is an back edge.
                 let mut loop_edges = block_stack[i..].windows(2)
@@ -162,7 +225,8 @@ fn collect_loops_impl<'a>(
                 // one) destinations.
                 // TODO: (penguinliong) Need another pass to merge same-source
                 // loops which have been split off because of branches in the
-                // header. In such case the loop header should end after the first conditional branch
+                // header. In such case the loop header should end after the
+                // first conditional branch
                 let icond_edge = loop_edges.iter()
                     .position(|x| {
                         let src_block = x.src.clone().upgrade().unwrap();
@@ -172,7 +236,9 @@ fn collect_loops_impl<'a>(
                             .iter()
                             .filter(|x| {
                                 if let Operand::Instruction(instr) = x {
-                                    let instr = instr.clone().upgrade().unwrap();
+                                    let instr = instr.clone()
+                                        .upgrade()
+                                        .unwrap();
                                     instr.opcode() == OP_LABEL
                                 } else {
                                     false
@@ -185,7 +251,9 @@ fn collect_loops_impl<'a>(
                 let body_edges = loop_edges.split_off(icond_edge);
                 loop_edges.shrink_to_fit();
                 let header_edges = loop_edges;
-                out.push(FunctionGraphLoop { header_edges, body_edges });
+                out.push(FunctionGraphLoop {
+                    itervars, header_edges, body_edges
+                });
                 is_back_edge = true;
                 break;
             }
@@ -198,7 +266,9 @@ fn collect_loops_impl<'a>(
         block_stack.pop();
     }
 }
-fn collect_loops<'a>(edges: &[FunctionGraphEdge<'a>]) -> Vec<FunctionGraphLoop<'a>> {
+fn collect_loops<'a>(
+    edges: &[FunctionGraphEdge<'a>]
+) -> Vec<FunctionGraphLoop<'a>> {
     if edges.is_empty() { return Default::default(); }
     let mut block_stack = vec![edges[0].src.clone()];
     let mut out = Vec::new();
@@ -248,7 +318,9 @@ fn parse_grpah<'a>(spv: &'a Spirv) -> Result<SpirvGraph<'a>> {
             OP_FUNCTION_END => {
                 if let Some(mut blocks) = cur_blocks.take() {
                     if let Some(beg) = cur_block_beg.take() {
-                        let inner = BlockInner { instrs: &spv.instrs()[beg..i] };
+                        let inner = BlockInner {
+                            instrs: &spv.instrs()[beg..i]
+                        };
                         let block = Block(Rc::new(inner));
                         blocks.push(block);
                     }
@@ -263,7 +335,9 @@ fn parse_grpah<'a>(spv: &'a Spirv) -> Result<SpirvGraph<'a>> {
             OP_LABEL => {
                 if let Some(blocks) = cur_blocks.as_mut() {
                     if let Some(beg) = cur_block_beg.take() {
-                        let inner = BlockInner { instrs: &spv.instrs()[beg..i] };
+                        let inner = BlockInner {
+                            instrs: &spv.instrs()[beg..i]
+                        };
                         let block = Block(Rc::new(inner));
                         blocks.push(block);
                     }

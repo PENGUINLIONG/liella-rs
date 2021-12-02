@@ -31,6 +31,14 @@ pub enum Operand {
     Instruction(InstructionRef),
     ResultPlaceholder,
 }
+impl Operand {
+    pub fn as_lit(&self) -> Option<u32> {
+        if let Self::Literal(x) = self { Some(*x) } else { None }
+    }
+    pub fn as_instr(&self) -> Option<InstructionRef> {
+        if let Self::Instruction(x) = self { Some(x.clone()) } else { None }
+    }
+}
 impl fmt::Debug for Operand {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use Operand::*;

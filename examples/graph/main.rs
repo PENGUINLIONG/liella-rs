@@ -31,40 +31,11 @@ fn main() {
                     ans += pred;
                 }
             }
-
-            {
-                int i = pred;
-                while (i-- != 0) {
-                    ans += pred;
-                }
-            }
-
-
-            {
-                int i = pred;
-                while (true) {
-                    ans += pred;
-                }
-            }
-
-            {
-                int i = pred;
-                do {
-                    ans += pred;
-                } while (i-- != 0);
-            }
-
-            {
-                int i = pred;
-                for (;;) {
-                    ans += pred;
-                }
-            }
         }
     "#, vert, vulkan1_0);
     let spv = Spv::try_from(spv).unwrap();
     let spv = Spirv::try_from(spv).unwrap();
     let graph = SpirvGraph::try_from(&spv).unwrap();
     print_graphviz_py(&graph);
-    println!("{:#?}", graph.subgraphs());
+    println!("\"\"\"\n{:#?}\n\"\"\"", graph.subgraphs());
 }
