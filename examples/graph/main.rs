@@ -5,6 +5,7 @@ use liella::graph::Graph;
 use inline_spirv::inline_spirv;
 #[cfg(not(release))]
 use liella::test_utils::dump_spv;
+use liella::rewrite;
 
 fn print_graphviz_py<'a>(graph: &Graph<'a>) {
     println!("from graphviz import Digraph");
@@ -27,22 +28,27 @@ fn main() {
         layout(location=0) in int pred;
         layout(location=0) out int ans;
         void main() {
+            int y = 12345;
             {
                 for (int i = pred; i < 5; ++i) {
-                    float y = 0;
-                    y += 1.0f;
-                    y += 2.0f;
+                    y += 1;
+                    y += 2;
                 }
             }
-            ans = 0;
+            ans = y;
         }
-    "#, vert, vulkan1_0);
+    "#, vert, vulkan1_0, no_debug);
     if cfg!(not(release)) {
         dump_spv("graph.spv", spv);
     }
 
     let spv = Spv::try_from(spv).unwrap();
     let spv = Spirv::try_from(spv).unwrap();
+    let rewrite_spv = rewrite::rewrite_spirv(&spv);
+    println!("------");
+    println!("{:#?}", spv);
+    println!("------");
+    println!("{:#?}", rewrite_spv);
     let graph = Graph::try_from(&spv).unwrap();
     print_graphviz_py(&graph);
     println!("\"\"\"\n{:#?}\n\"\"\"", graph);

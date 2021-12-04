@@ -58,6 +58,9 @@ impl InstructionInner {
     pub fn opcode(&self) -> OpCode {
         self.opcode
     }
+    pub fn opname(&self) -> &'static str {
+        gen::opcode2name(self.opcode)
+    }
     pub fn operands(&self) -> &[Operand] {
         &self.operands
     }
@@ -258,6 +261,13 @@ pub struct Spirv {
     stmts: Vec<InstructionRef>,
 }
 impl Spirv {
+    pub fn new(
+        header: SpirvHeader,
+        instr_pool: HashSet<Instruction>,
+        stmts: Vec<InstructionRef>
+    ) -> Self {
+        Spirv { header, instr_pool, stmts }
+    }
     pub fn header(&self) -> &SpirvHeader { &self.header }
     pub fn stmts(&self) -> &[InstructionRef] { &self.stmts }
 }
@@ -289,6 +299,30 @@ impl<'a> TryFrom<Spv<'a>> for Spirv {
             stmts: stmt_refs
         };
         Ok(out)
+    }
+}
+impl fmt::Debug for Spirv {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fn fmt_instr_lisp(instr: &InstructionRef) -> String {
+            let instr = instr.upgrade().unwrap();
+            let operands_lit_it = instr.operands().iter()
+                .map(|operand| {
+                    match operand {
+                        Operand::Instruction(x) => fmt_instr_lisp(&x),
+                        Operand::Literal(x) => format!("{}", x),
+                        Operand::ResultPlaceholder => "<result>".to_owned(),
+                    }
+                });
+            let mut segs = vec![instr.opname().to_owned()];
+            segs.extend(operands_lit_it);
+
+            let lit = segs.join(" ");
+            format!("({})", lit)
+        }
+
+        f.debug_list()
+            .entries(self.stmts().iter().map(fmt_instr_lisp))
+            .finish()
     }
 }
 
