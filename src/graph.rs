@@ -1,4 +1,5 @@
 use std::convert::TryFrom;
+use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 use std::rc::{Rc, Weak};
 use std::fmt;
@@ -169,7 +170,7 @@ pub struct GraphLoop<'a> {
     /// In our SPIR-V case, an `OpStore` of variable using an `OpLoad`ed value
     /// from that same variable makes an itervar. Other variables referred to
     /// the itervar receives a driving force to mutate.
-    pub itervars: Vec<InstructionRef>,
+    pub itervars: HashSet<InstructionRef>,
     /// Edges from the back edge destination to the conditional-branch block.
     /// This ought to be empty if there is no conditional branch in loop, i.e.,
     /// an infinite loop.
@@ -220,7 +221,7 @@ fn collect_loops_impl<'a>(
                         find_itervars(block.instrs())
                     })
                     .map(|x| x.downgrade())
-                    .collect::<Vec<_>>();
+                    .collect::<HashSet<_>>();
                 // One of the ancester is the destination block of this edge.
                 // The current edge is an back edge.
                 let mut loop_edges = block_stack[i..].windows(2)
