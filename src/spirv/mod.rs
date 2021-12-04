@@ -2,7 +2,7 @@ use std::ops::{Deref, DerefMut};
 use std::cmp::{PartialEq, Eq};
 use std::rc::{Rc, Weak};
 use std::fmt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use crate::error::{LiellaError as Error, LiellaResult as Result};
 use crate::spv::{Instr, Spv};
@@ -78,7 +78,11 @@ impl DerefMut for Instruction {
     }
 }
 impl Instruction {
-    pub fn downgrade(self) -> InstructionRef {
+    pub fn new(opcode: OpCode, operands: Vec<Operand>) -> Instruction {
+        let inner = InstructionInner { opcode, operands };
+        Instruction(Rc::new(inner))
+    }
+    pub fn downgrade(&self) -> InstructionRef {
         InstructionRef(Rc::downgrade(&self.0))
     }
 }
@@ -95,17 +99,33 @@ impl PartialEq for Instruction {
     }
 }
 impl Eq for Instruction {}
+impl std::hash::Hash for Instruction {
+    fn hash<H>(&self, state: &mut H) where H: std::hash::Hasher {
+        state.write_usize(Rc::as_ptr(&self.0) as usize);
+    }
+}
 
 #[derive(Clone)]
 pub struct InstructionRef(Weak<InstructionInner>);
 impl InstructionRef {
-    pub fn upgrade(self) -> Option<Instruction> {
+    pub fn upgrade(&self) -> Option<Instruction> {
         self.0.upgrade().map(|x| Instruction(x))
     }
 }
 impl fmt::Debug for InstructionRef {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str(&make_instr_name_weak(&self.0))
+    }
+}
+impl PartialEq for InstructionRef {
+    fn eq(&self, b: &Self) -> bool {
+        self.0.ptr_eq(&b.0)
+    }
+}
+impl Eq for InstructionRef {}
+impl std::hash::Hash for InstructionRef {
+    fn hash<H>(&self, state: &mut H) where H: std::hash::Hasher {
+        state.write_usize(self.0.as_ptr() as usize);
     }
 }
 
@@ -153,8 +173,30 @@ impl SpirvDeserializer {
             }
             Ok(true)
         } else {
+            // Found forward references that cannot be resolved now.
             Ok(false)
         }
+    }
+    /// Collect statment instructions (those doesn't have a reference ID).
+    fn into_stmts_exprs(self) -> (Vec<Instruction>, Vec<Instruction>) {
+        const OP_LABEL: u32 = 248;
+        let expr_idxs = self.id_map.into_iter()
+            .map(|(_id, idx)| idx)
+            .collect::<HashSet<_>>();
+        let mut stmts = Vec::new();
+        let mut exprs = Vec::new();
+        for (idx, instr) in self.instrs.into_iter().enumerate() {
+            if let Some(instr) = instr {
+                // TODO: (penguinliong) Find another way to probe labels to
+                // replace this dirty workaround.
+                if expr_idxs.contains(&idx) && instr.opcode() != OP_LABEL {
+                    exprs.push(instr);
+                } else {
+                    stmts.push(instr);
+                }
+            }
+        }
+        (stmts, exprs)
     }
 }
 
@@ -201,39 +243,51 @@ fn is_line_debug_instr(instr: &Instr) -> bool {
         _ => false,
     }
 }
-fn deserialize_instrs(instrs: &[Instr]) -> Result<Vec<Instruction>> {
-    let mut de = SpirvDeserializer::new(instrs.len());
-    let mut done = true;
-    for _ in 0..100 {
-        done = true;
-        for (i, instr) in instrs.iter().enumerate() {
-            // Ignore some in-function debug instructions because they can show
-            // up before `OpLabel` which break other processing.
-            if is_line_debug_instr(instr) { continue; }
-            done &= de.deserialize_instr(i, instr)?;
-        }
-        if done { break; }
-    }
-    if !done {
-        return Err(Error::UNUSUAL_REFERENCE_COMPLEXITY);
-    }
-    let out = de.instrs.into_iter().filter_map(|x| x).collect();
-    Ok(out)
-}
 
+#[derive(Clone)]
 pub struct Spirv {
+    /// SPIR-V header.
     header: SpirvHeader,
-    instrs: Vec<Instruction>,
+    /// Instruction pool to keep at least one reference count to the
+    /// allocations. There is no guarantee the instructions are kept in order in
+    /// `instr_pool`. Any demand on instruction ordering should be redirected to
+    /// `stmts`.
+    instr_pool: HashSet<Instruction>,
+    /// Statements, which are instructions that don't have other instructions
+    /// refering to them.
+    stmts: Vec<InstructionRef>,
 }
 impl Spirv {
     pub fn header(&self) -> &SpirvHeader { &self.header }
-    pub fn instrs(&self) -> &[Instruction] { &self.instrs }
+    pub fn stmts(&self) -> &[InstructionRef] { &self.stmts }
 }
 impl<'a> TryFrom<Spv<'a>> for Spirv {
     type Error = Error;
     fn try_from(spv: Spv<'a>) -> Result<Spirv> {
-        let instrs = deserialize_instrs(spv.instrs())?;
-        let out = Spirv { header: spv.header().clone(), instrs };
+        let mut de = SpirvDeserializer::new(spv.instrs().len());
+        let mut done = true;
+        for _ in 0..100 {
+            done = true;
+            for (i, instr) in spv.instrs().iter().enumerate() {
+                // Ignore some in-function debug instructions because they can
+                // show up before `OpLabel` which break other processing.
+                if is_line_debug_instr(instr) { continue; }
+                done &= de.deserialize_instr(i, instr)?;
+            }
+            if done { break; }
+        }
+        if !done {
+            return Err(Error::UNUSUAL_REFERENCE_COMPLEXITY);
+        }
+        let (stmts, exprs) = de.into_stmts_exprs();
+        let stmt_refs = stmts.iter().map(|x| x.downgrade()).collect::<Vec<_>>();
+        let instr_pool = stmts.into_iter().chain(exprs).collect();
+
+        let out = Spirv {
+            header: spv.header().clone(),
+            instr_pool,
+            stmts: stmt_refs
+        };
         Ok(out)
     }
 }
@@ -247,20 +301,14 @@ mod tests {
         let spv: &'static [u32] =
             inline_spirv!("#version 450\nvoid main() {}", comp, vulkan1_0);
         let spv = Spv::try_from(spv).unwrap();
-        let operand_lens1: Vec<_> = spv.instrs()
+        let _operand_lens1: Vec<_> = spv.instrs()
             .iter()
             .map(|x| x.len())
             .collect();
         let spv = Spirv::try_from(spv).unwrap();
-        let operand_lens2: Vec<_> = spv.instrs()
+        let _operand_lens2: Vec<_> = spv.stmts()
             .iter()
-            .map(|x| x.len())
+            .map(|x| x.upgrade().unwrap().len())
             .collect();
-        // There should be a same numbder of instructions emitted.
-        assert_eq!(operand_lens1.len(), operand_lens2.len());
-        // Also the same number of operands converted for each instruction.
-        for (a, b) in operand_lens1.iter().zip(operand_lens2.iter()) {
-            assert_eq!(a, b);
-        }
     }
 }

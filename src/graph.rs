@@ -6,9 +6,14 @@ use crate::spirv::{Instruction, InstructionRef, OpCode, Operand, Spirv};
 use crate::error::{LiellaError as Error, LiellaResult as Result};
 
 const OP_STORE: OpCode = 62;
-const OP_FUNCTION: OpCode = 54;
-const OP_FUNCTION_END: OpCode = 56;
 const OP_LABEL: OpCode = 248;
+const OP_BRANCH: u32 = 249;
+const OP_BRANCH_CONDITIONAL: u32 = 250;
+const OP_SWITCH: u32 = 251;
+const OP_KILL: u32 = 252;
+const OP_RETURN: u32 = 253;
+const OP_RETURN_VALUE: u32 = 254;
+const OP_UNREACHABLE: u32 = 255;
 
 fn make_block_name<'a>(inner: &Rc<BlockInner<'a>>) -> String {
     format!("Block@{:016x}",
@@ -21,17 +26,17 @@ fn make_block_name_weak<'a>(inner: &Weak<BlockInner<'a>>) -> String {
 }
 
 pub struct BlockInner<'a> {
-    instrs: &'a [Instruction],
+    instrs: &'a [InstructionRef],
 }
 impl<'a> BlockInner<'a> {
-    pub fn instrs(&self) -> &'a [Instruction] {
+    pub fn instrs(&self) -> &'a [InstructionRef] {
         &self.instrs
     }
-    pub fn label_instr(&self) -> &'a Instruction {
-        self.instrs.first().unwrap()
+    pub fn label_instr(&self) -> Instruction {
+        self.instrs.first().unwrap().upgrade().unwrap()
     }
-    pub fn branch_instr(&self) -> &'a Instruction {
-        self.instrs.last().unwrap()
+    pub fn branch_instr(&self) -> Instruction {
+        self.instrs.last().unwrap().upgrade().unwrap()
     }
 }
 
@@ -49,7 +54,7 @@ impl<'a> DerefMut for Block<'a> {
     }
 }
 impl<'a> Block<'a> {
-    pub fn downgrade(self) -> BlockRef<'a> {
+    pub fn downgrade(&self) -> BlockRef<'a> {
         let out = Rc::downgrade(&self.0);
         BlockRef(out)
     }
@@ -71,7 +76,7 @@ impl<'a> Eq for Block<'a> {}
 #[derive(Clone)]
 pub struct BlockRef<'a>(Weak<BlockInner<'a>>);
 impl<'a> BlockRef<'a> {
-    pub fn upgrade(self) -> Option<Block<'a>> {
+    pub fn upgrade(&self) -> Option<Block<'a>> {
         let out = self.0.upgrade();
         out.map(|x| Block(x))
     }
@@ -89,26 +94,26 @@ impl<'a> PartialEq for BlockRef<'a> {
 impl<'a> Eq for BlockRef<'a> {}
 
 #[derive(Clone, Debug)]
-pub struct FunctionGraphEdge<'a> {
+pub struct GraphEdge<'a> {
     pub src: BlockRef<'a>,
     pub dst: BlockRef<'a>,
 }
 fn collect_edges<'a>(
     blocks: &[Block<'a>]
-) -> Result<Vec<FunctionGraphEdge<'a>>> {
+) -> Result<Vec<GraphEdge<'a>>> {
     let mut out = Vec::new();
     for block in blocks.iter() {
         let src = block.clone().downgrade();
         for operand in block.branch_instr().operands() {
             if let Operand::Instruction(dst_label) = operand {
-                let dst_label = dst_label.clone().upgrade().unwrap();
+                let dst_label = dst_label.upgrade().unwrap();
                 if dst_label.opcode() == OP_LABEL {
                     let dst = blocks.iter()
-                        .find(|x| x.label_instr() == &dst_label)
+                        .find(|x| x.label_instr() == dst_label)
                         .ok_or(Error::UNEXPECTED_OP)?
                         .clone()
                         .downgrade();
-                    let edge = FunctionGraphEdge { src: src.clone(), dst };
+                    let edge = GraphEdge { src: src.clone(), dst };
                     out.push(edge);
                 }
             }
@@ -138,7 +143,7 @@ fn find_itervar_impl(candidate: &Instruction, instr: &Instruction) -> bool {
         instr.operands().iter()
             .any(|x| {
                 if let Some(child_instr) = x.as_instr() {
-                    let child_instr = child_instr.clone().upgrade().unwrap();
+                    let child_instr = child_instr.upgrade().unwrap();
                     find_itervar_impl(candidate, &child_instr)
                 } else {
                     false
@@ -146,14 +151,14 @@ fn find_itervar_impl(candidate: &Instruction, instr: &Instruction) -> bool {
             })
     }
 }
-fn find_itervars(instrs: &[Instruction]) -> Vec<Instruction> {
+fn find_itervars(instrs: &[InstructionRef]) -> Vec<Instruction> {
     instrs.iter()
-        .filter_map(|x| find_itervar(x.clone()))
+        .filter_map(|x| find_itervar(x.upgrade().unwrap()))
         .collect::<Vec<_>>()
 }
 
 #[derive(Clone, Debug)]
-pub struct FunctionGraphLoop<'a> {
+pub struct GraphLoop<'a> {
     /// Definition of iteration variable instruction:
     /// 1. Autonomously mutate inside a loop, forming a dynamic system of its
     ///    own; thus can conclude a recursive function for each itervar.
@@ -168,25 +173,33 @@ pub struct FunctionGraphLoop<'a> {
     /// Edges from the back edge destination to the conditional-branch block.
     /// This ought to be empty if there is no conditional branch in loop, i.e.,
     /// an infinite loop.
-    pub header_edges: Vec<FunctionGraphEdge<'a>>,
+    pub header_edges: Vec<GraphEdge<'a>>,
     /// Edges from the conditional-branch block to the destination of a back
     /// edge. The back edge is at the end of `body_edges`.
-    pub body_edges: Vec<FunctionGraphEdge<'a>>,
+    pub body_edges: Vec<GraphEdge<'a>>,
 }
-impl<'a> FunctionGraphLoop<'a> {
+impl<'a> GraphLoop<'a> {
+    pub fn edges(&self) -> impl Iterator<Item=&GraphEdge<'a>> {
+        let header_edges = self.header_edges.iter();
+        let body_edges = self.body_edges.iter();
+        header_edges.chain(body_edges)
+    }
+    pub fn blocks(&self) -> impl Iterator<Item=&BlockRef<'a>> {
+        self.edges().map(|x| &x.src)
+    }
     pub fn selection_block(&self) -> Option<Block> {
         self.header_edges.last()
-            .and_then(|x| x.dst.clone().upgrade())
+            .and_then(|x| x.dst.upgrade())
     }
-    pub fn selection_instr(&self) -> Option<Instruction> {
+    pub fn selection_instr(&self) -> Option<InstructionRef> {
         self.selection_block()
             .and_then(|x| x.instrs().last().cloned())
     }
 }
 fn collect_loops_impl<'a>(
-    edges: &[FunctionGraphEdge<'a>],
+    edges: &[GraphEdge<'a>],
     block_stack: &mut Vec<BlockRef<'a>>,
-    out: &mut Vec<FunctionGraphLoop<'a>>,
+    out: &mut Vec<GraphLoop<'a>>,
 ) {
     let src_block = block_stack.last().unwrap().clone();
     let dst_blocks = edges.iter()
@@ -203,7 +216,7 @@ fn collect_loops_impl<'a>(
             if ancester_block == &dst_block {
                 let itervars = block_stack[i..].iter()
                     .flat_map(|x| {
-                        let block = x.clone().upgrade().unwrap();
+                        let block = x.upgrade().unwrap();
                         find_itervars(block.instrs())
                     })
                     .map(|x| x.downgrade())
@@ -211,11 +224,11 @@ fn collect_loops_impl<'a>(
                 // One of the ancester is the destination block of this edge.
                 // The current edge is an back edge.
                 let mut loop_edges = block_stack[i..].windows(2)
-                    .map(|pair| FunctionGraphEdge {
+                    .map(|pair| GraphEdge {
                         src: pair[0].clone(),
                         dst: pair[1].clone(),
                     })
-                    .chain([FunctionGraphEdge {
+                    .chain([GraphEdge {
                         src: src_block.clone(),
                         dst: dst_block.clone(),
                     }])
@@ -229,8 +242,10 @@ fn collect_loops_impl<'a>(
                 // first conditional branch
                 let icond_edge = loop_edges.iter()
                     .position(|x| {
-                        let src_block = x.src.clone().upgrade().unwrap();
+                        let src_block = x.src.upgrade().unwrap();
                         let ndst = src_block.instrs.last()
+                            .unwrap()
+                            .upgrade()
                             .unwrap()
                             .operands()
                             .iter()
@@ -251,7 +266,7 @@ fn collect_loops_impl<'a>(
                 let body_edges = loop_edges.split_off(icond_edge);
                 loop_edges.shrink_to_fit();
                 let header_edges = loop_edges;
-                out.push(FunctionGraphLoop {
+                out.push(GraphLoop {
                     itervars, header_edges, body_edges
                 });
                 is_back_edge = true;
@@ -267,8 +282,8 @@ fn collect_loops_impl<'a>(
     }
 }
 fn collect_loops<'a>(
-    edges: &[FunctionGraphEdge<'a>]
-) -> Vec<FunctionGraphLoop<'a>> {
+    edges: &[GraphEdge<'a>]
+) -> Vec<GraphLoop<'a>> {
     if edges.is_empty() { return Default::default(); }
     let mut block_stack = vec![edges[0].src.clone()];
     let mut out = Vec::new();
@@ -277,83 +292,60 @@ fn collect_loops<'a>(
 }
 
 #[derive(Debug)]
-pub struct FunctionGraph<'a> {
+pub struct Graph<'a> {
     blocks: Vec<Block<'a>>,
-    edges: Vec<FunctionGraphEdge<'a>>,
-    loops: Vec<FunctionGraphLoop<'a>>,
+    edges: Vec<GraphEdge<'a>>,
+    loops: Vec<GraphLoop<'a>>,
 }
-impl<'a> FunctionGraph<'a> {
+impl<'a> Graph<'a> {
     pub fn blocks(&self) -> &[Block<'a>] {
         &self.blocks
     }
-    pub fn edges(&self) -> &[FunctionGraphEdge<'a>] {
+    pub fn edges(&self) -> &[GraphEdge<'a>] {
         &self.edges
     }
-    pub fn loops(&self) -> &[FunctionGraphLoop<'a>] {
+    pub fn loops(&self) -> &[GraphLoop<'a>] {
         &self.loops
     }
 }
 
-#[derive(Debug)]
-pub struct SpirvGraph<'a> {
-    subgraphs: Vec<FunctionGraph<'a>>,
-}
-impl<'a> SpirvGraph<'a> {
-    pub fn subgraphs(&self) -> &[FunctionGraph<'a>] {
-        &self.subgraphs
-    }
-}
-
-fn parse_grpah<'a>(spv: &'a Spirv) -> Result<SpirvGraph<'a>> {
-    let mut fns: Vec<FunctionGraph<'a>> = Vec::new();
-    let mut cur_blocks: Option<Vec<Block<'a>>> = None;
+fn parse_grpah<'a>(spv: &'a Spirv) -> Result<Graph<'a>> {
+    let mut blocks: Vec<Block<'a>> = Vec::new();
     let mut cur_block_beg: Option<usize> = None;
 
-    for (i, instr) in spv.instrs().iter().enumerate() {
+    for (i, instr) in spv.stmts().iter().enumerate() {
+        let instr = instr.upgrade().unwrap();
         match instr.opcode() {
-            OP_FUNCTION => {
-                if cur_blocks.is_some() { return Err(Error::UNEXPECTED_OP); }
-                cur_blocks = Some(Default::default());
-            },
-            OP_FUNCTION_END => {
-                if let Some(mut blocks) = cur_blocks.take() {
-                    if let Some(beg) = cur_block_beg.take() {
-                        let inner = BlockInner {
-                            instrs: &spv.instrs()[beg..i]
-                        };
-                        let block = Block(Rc::new(inner));
-                        blocks.push(block);
-                    }
-                    let edges = collect_edges(&blocks)?;
-                    let loops = collect_loops(&edges);
-                    let f = FunctionGraph { blocks, edges, loops };
-                    fns.push(f);
-                } else {
-                    return Err(Error::UNEXPECTED_OP);
-                }
-            },
             OP_LABEL => {
-                if let Some(blocks) = cur_blocks.as_mut() {
-                    if let Some(beg) = cur_block_beg.take() {
-                        let inner = BlockInner {
-                            instrs: &spv.instrs()[beg..i]
-                        };
-                        let block = Block(Rc::new(inner));
-                        blocks.push(block);
-                    }
-                } else {
+                if cur_block_beg.is_some() {
                     return Err(Error::UNEXPECTED_OP);
                 }
                 cur_block_beg = Some(i);
             },
+            OP_BRANCH | OP_BRANCH_CONDITIONAL | OP_SWITCH | OP_KILL |
+                OP_RETURN | OP_RETURN_VALUE | OP_UNREACHABLE =>
+            {
+                if let Some(beg) = cur_block_beg.take() {
+                    let inner = BlockInner {
+                        instrs: &spv.stmts()[beg..=i]
+                    };
+                    let block = Block(Rc::new(inner));
+                    blocks.push(block);
+                } else {
+                    return Err(Error::UNEXPECTED_OP);
+                }
+            }
             _ => {},
         }
     }
-    let out = SpirvGraph { subgraphs: fns };
+
+    let edges = collect_edges(&blocks)?;
+    let loops = collect_loops(&edges);
+    let out = Graph { blocks, edges, loops };
     Ok(out)
 }
 
-impl<'a> TryFrom<&'a Spirv> for SpirvGraph<'a> {
+impl<'a> TryFrom<&'a Spirv> for Graph<'a> {
     type Error = Error;
     fn try_from(spv: &'a Spirv) -> Result<Self> {
         let out = parse_grpah(spv)?;
@@ -377,10 +369,8 @@ mod tests {
         "#, vert, vulkan1_0);
         let spv = crate::spv::Spv::try_from(spv).unwrap();
         let spv = Spirv::try_from(spv).unwrap();
-        let graph = SpirvGraph::try_from(&spv).unwrap();
-        // One entry point -> 1 function.
-        assert_eq!(graph.subgraphs().len(), 1);
+        let graph = Graph::try_from(&spv).unwrap();
         // Selection + true + false + merge -> 4 blocks.
-        assert_eq!(graph.subgraphs()[0].blocks().len(), 4);
+        assert_eq!(graph.blocks().len(), 4);
     }
 }
