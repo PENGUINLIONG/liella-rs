@@ -1,5 +1,6 @@
 use std::collections::hash_map::{HashMap, Entry};
 use std::collections::hash_set::HashSet;
+use std::convert::TryFrom;
 use crate::graph::{Block, BlockRef, Graph, GraphEdge,
     GraphLoop};
 use crate::spirv::{OpCode, Instruction, InstructionRef, Operand, Spirv};
@@ -97,12 +98,10 @@ impl Rewriter {
             // instructions for them.
             let var = &var.upgrade().unwrap();
             let value = value.upgrade().unwrap();
-            println!("store {:?} -> {:?}", var, value);
             self.var_states.insert(var.clone(), value.clone());
         } else if let Some(var) = match_simple_load_instr(&out_instr) {
             let var = &var.upgrade().unwrap();
             let value = self.var_states.get(&var).unwrap();
-            println!("load {:?} -> {:?}", var, value);
             self.instr_map.insert(instr.clone(), value.clone());
         } else {
             self.instr_map.insert(instr.clone(), out_instr);

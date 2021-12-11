@@ -1,5 +1,5 @@
 use std::convert::TryFrom;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::rc::{Rc, Weak};
 use std::fmt;
@@ -16,21 +16,21 @@ const OP_RETURN: u32 = 253;
 const OP_RETURN_VALUE: u32 = 254;
 const OP_UNREACHABLE: u32 = 255;
 
-fn make_block_name<'a>(inner: &Rc<BlockInner<'a>>) -> String {
+fn make_block_name(inner: &Rc<BlockInner>) -> String {
     format!("Block@{:016x}",
-        (Rc::as_ptr(inner) as *const BlockInner<'a>) as usize)
+        (Rc::as_ptr(inner) as *const BlockInner) as usize)
 }
-fn make_block_name_weak<'a>(inner: &Weak<BlockInner<'a>>) -> String {
+fn make_block_name_weak(inner: &Weak<BlockInner>) -> String {
     inner.upgrade()
         .map(|x| make_block_name(&x))
         .unwrap_or("Block@DROPPED".to_owned())
 }
 
-pub struct BlockInner<'a> {
-    instrs: &'a [InstructionRef],
+pub struct BlockInner {
+    instrs: Vec<InstructionRef>,
 }
-impl<'a> BlockInner<'a> {
-    pub fn instrs(&self) -> &'a [InstructionRef] {
+impl BlockInner {
+    pub fn instrs(&self) -> &[InstructionRef] {
         &self.instrs
     }
     pub fn label_instr(&self) -> Instruction {
@@ -42,77 +42,80 @@ impl<'a> BlockInner<'a> {
 }
 
 #[derive(Clone)]
-pub struct Block<'a>(Rc<BlockInner<'a>>);
-impl<'a> Deref for Block<'a> {
-    type Target = BlockInner<'a>;
-    fn deref(&self) -> &BlockInner<'a> {
+pub struct Block(Rc<BlockInner>);
+impl Deref for Block {
+    type Target = BlockInner;
+    fn deref(&self) -> &BlockInner {
         self.0.deref()
     }
 }
-impl<'a> DerefMut for Block<'a> {
-    fn deref_mut(&mut self) -> &mut BlockInner<'a> {
+impl DerefMut for Block {
+    fn deref_mut(&mut self) -> &mut BlockInner {
         Rc::get_mut(&mut self.0).unwrap()
     }
 }
-impl<'a> Block<'a> {
-    pub fn downgrade(&self) -> BlockRef<'a> {
+impl Block {
+    pub fn downgrade(&self) -> BlockRef {
         let out = Rc::downgrade(&self.0);
         BlockRef(out)
     }
 }
-impl<'a> fmt::Debug for Block<'a> {
+impl From<Vec<InstructionRef>> for Block {
+    fn from(instrs: Vec<InstructionRef>) -> Self {
+        let inner = BlockInner { instrs };
+        Block(Rc::new(inner))
+    }
+}
+impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct(&make_block_name(&self.0))
             .field("instrs", &self.instrs)
             .finish()
     }
 }
-impl<'a> PartialEq for Block<'a> {
+impl PartialEq for Block {
     fn eq(&self, b: &Self) -> bool {
         Rc::ptr_eq(&self.0, &b.0)
     }
 }
-impl<'a> Eq for Block<'a> {}
+impl Eq for Block {}
 
 #[derive(Clone)]
-pub struct BlockRef<'a>(Weak<BlockInner<'a>>);
-impl<'a> BlockRef<'a> {
-    pub fn upgrade(&self) -> Option<Block<'a>> {
+pub struct BlockRef(Weak<BlockInner>);
+impl BlockRef {
+    pub fn upgrade(&self) -> Option<Block> {
         let out = self.0.upgrade();
         out.map(|x| Block(x))
     }
 }
-impl<'a> fmt::Debug for BlockRef<'a> {
+impl fmt::Debug for BlockRef {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str(&make_block_name_weak(&self.0))
     }
 }
-impl<'a> PartialEq for BlockRef<'a> {
+impl PartialEq for BlockRef {
     fn eq(&self, b: &Self) -> bool {
         self.0.ptr_eq(&b.0)
     }
 }
-impl<'a> Eq for BlockRef<'a> {}
+impl Eq for BlockRef {}
 
 #[derive(Clone, Debug)]
-pub struct GraphEdge<'a> {
-    pub src: BlockRef<'a>,
-    pub dst: BlockRef<'a>,
+pub struct GraphEdge {
+    pub src: BlockRef,
+    pub dst: BlockRef,
 }
-fn collect_edges<'a>(
-    blocks: &[Block<'a>]
-) -> Result<Vec<GraphEdge<'a>>> {
+fn collect_edges(
+    blocks: &HashMap<InstructionRef, Block>,
+) -> Result<Vec<GraphEdge>> {
     let mut out = Vec::new();
-    for block in blocks.iter() {
-        let src = block.clone().downgrade();
+    for block in blocks.values() {
+        let src = block.downgrade();
         for operand in block.branch_instr().operands() {
             if let Operand::Instruction(dst_label) = operand {
-                let dst_label = dst_label.upgrade().unwrap();
-                if dst_label.opcode() == OP_LABEL {
-                    let dst = blocks.iter()
-                        .find(|x| x.label_instr() == dst_label)
+                if dst_label.upgrade().unwrap().opcode() == OP_LABEL {
+                    let dst = blocks.get(&dst_label)
                         .ok_or(Error::UNEXPECTED_OP)?
-                        .clone()
                         .downgrade();
                     let edge = GraphEdge { src: src.clone(), dst };
                     out.push(edge);
@@ -159,7 +162,7 @@ fn find_itervars(instrs: &[InstructionRef]) -> Vec<Instruction> {
 }
 
 #[derive(Clone, Debug)]
-pub struct GraphLoop<'a> {
+pub struct GraphLoop {
     /// Definition of iteration variable instruction:
     /// 1. Autonomously mutate inside a loop, forming a dynamic system of its
     ///    own; thus can conclude a recursive function for each itervar.
@@ -174,18 +177,18 @@ pub struct GraphLoop<'a> {
     /// Edges from the back edge destination to the conditional-branch block.
     /// This ought to be empty if there is no conditional branch in loop, i.e.,
     /// an infinite loop.
-    pub header_edges: Vec<GraphEdge<'a>>,
+    pub header_edges: Vec<GraphEdge>,
     /// Edges from the conditional-branch block to the destination of a back
     /// edge. The back edge is at the end of `body_edges`.
-    pub body_edges: Vec<GraphEdge<'a>>,
+    pub body_edges: Vec<GraphEdge>,
 }
-impl<'a> GraphLoop<'a> {
-    pub fn edges(&self) -> impl Iterator<Item=&GraphEdge<'a>> {
+impl GraphLoop {
+    pub fn edges(&self) -> impl Iterator<Item=&GraphEdge> {
         let header_edges = self.header_edges.iter();
         let body_edges = self.body_edges.iter();
         header_edges.chain(body_edges)
     }
-    pub fn blocks(&self) -> impl Iterator<Item=&BlockRef<'a>> {
+    pub fn blocks(&self) -> impl Iterator<Item=&BlockRef> {
         self.edges().map(|x| &x.src)
     }
     pub fn selection_block(&self) -> Option<Block> {
@@ -197,10 +200,10 @@ impl<'a> GraphLoop<'a> {
             .and_then(|x| x.instrs().last().cloned())
     }
 }
-fn collect_loops_impl<'a>(
-    edges: &[GraphEdge<'a>],
-    block_stack: &mut Vec<BlockRef<'a>>,
-    out: &mut Vec<GraphLoop<'a>>,
+fn collect_loops_impl(
+    edges: &[GraphEdge],
+    block_stack: &mut Vec<BlockRef>,
+    out: &mut Vec<GraphLoop>,
 ) {
     let src_block = block_stack.last().unwrap().clone();
     let dst_blocks = edges.iter()
@@ -282,9 +285,9 @@ fn collect_loops_impl<'a>(
         block_stack.pop();
     }
 }
-fn collect_loops<'a>(
-    edges: &[GraphEdge<'a>]
-) -> Vec<GraphLoop<'a>> {
+fn collect_loops(
+    edges: &[GraphEdge]
+) -> Vec<GraphLoop> {
     if edges.is_empty() { return Default::default(); }
     let mut block_stack = vec![edges[0].src.clone()];
     let mut out = Vec::new();
@@ -293,25 +296,25 @@ fn collect_loops<'a>(
 }
 
 #[derive(Debug)]
-pub struct Graph<'a> {
-    blocks: Vec<Block<'a>>,
-    edges: Vec<GraphEdge<'a>>,
-    loops: Vec<GraphLoop<'a>>,
+pub struct Graph {
+    blocks: Vec<Block>,
+    edges: Vec<GraphEdge>,
+    loops: Vec<GraphLoop>,
 }
-impl<'a> Graph<'a> {
-    pub fn blocks(&self) -> &[Block<'a>] {
+impl Graph {
+    pub fn blocks(&self) -> &[Block] {
         &self.blocks
     }
-    pub fn edges(&self) -> &[GraphEdge<'a>] {
+    pub fn edges(&self) -> &[GraphEdge] {
         &self.edges
     }
-    pub fn loops(&self) -> &[GraphLoop<'a>] {
+    pub fn loops(&self) -> &[GraphLoop] {
         &self.loops
     }
 }
 
-fn parse_grpah<'a>(spv: &'a Spirv) -> Result<Graph<'a>> {
-    let mut blocks: Vec<Block<'a>> = Vec::new();
+fn parse_grpah(spv: &Spirv) -> Result<Graph> {
+    let mut blocks: HashMap<InstructionRef, Block> = HashMap::new();
     let mut cur_block_beg: Option<usize> = None;
 
     for (i, instr) in spv.stmts().iter().enumerate() {
@@ -327,11 +330,12 @@ fn parse_grpah<'a>(spv: &'a Spirv) -> Result<Graph<'a>> {
                 OP_RETURN | OP_RETURN_VALUE | OP_UNREACHABLE =>
             {
                 if let Some(beg) = cur_block_beg.take() {
+                    let label_instr = spv.stmts()[beg].clone();
                     let inner = BlockInner {
-                        instrs: &spv.stmts()[beg..=i]
+                        instrs: spv.stmts()[beg..=i].to_owned(),
                     };
                     let block = Block(Rc::new(inner));
-                    blocks.push(block);
+                    blocks.insert(label_instr, block);
                 } else {
                     return Err(Error::UNEXPECTED_OP);
                 }
@@ -342,13 +346,14 @@ fn parse_grpah<'a>(spv: &'a Spirv) -> Result<Graph<'a>> {
 
     let edges = collect_edges(&blocks)?;
     let loops = collect_loops(&edges);
+    let blocks = blocks.into_values().collect::<Vec<_>>();
     let out = Graph { blocks, edges, loops };
     Ok(out)
 }
 
-impl<'a> TryFrom<&'a Spirv> for Graph<'a> {
+impl TryFrom<&Spirv> for Graph {
     type Error = Error;
-    fn try_from(spv: &'a Spirv) -> Result<Self> {
+    fn try_from(spv: &Spirv) -> Result<Self> {
         let out = parse_grpah(spv)?;
         Ok(out)
     }

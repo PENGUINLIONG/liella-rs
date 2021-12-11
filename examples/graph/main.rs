@@ -7,7 +7,7 @@ use inline_spirv::inline_spirv;
 use liella::test_utils::dump_spv;
 use liella::rewrite;
 
-fn print_graphviz_py<'a>(graph: &Graph<'a>) {
+fn print_graphviz_py<'a>(graph: &Graph) {
     println!("from graphviz import Digraph");
     println!("g = Digraph()");
     for block in graph.blocks() {
