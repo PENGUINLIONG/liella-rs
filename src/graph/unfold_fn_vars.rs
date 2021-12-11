@@ -115,7 +115,7 @@ impl Rewriter {
     }
 }
 
-pub fn rewrite_spirv(spv: &Spirv) -> Spirv {
+pub fn apply(spv: &Spirv) -> Spirv {
     let header = spv.header().clone();
     let mut rewriter = Rewriter::new();
     for stmt in spv.stmts().iter() {
@@ -126,64 +126,4 @@ pub fn rewrite_spirv(spv: &Spirv) -> Spirv {
         .collect();
     let stmts = rewriter.stmts;
     Spirv::new(header, instr_pool, stmts)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    const OP_TYPE_FLOAT: u32 = 22;
-    const OP_TYPE_POINTER: u32 = 32;
-    const OP_CONSTANT: u32 = 43;
-    const OP_FADD: u32 = 129;
-
-    //#[test]
-    //fn test_rewrite() {
-    //    let float = Instruction::new(OP_TYPE_FLOAT, vec![
-    //        Operand::ResultPlaceholder,
-    //        Operand::Literal(32),
-    //    ]);
-    //    let pfloat = Instruction::new(OP_TYPE_POINTER, vec![
-    //        Operand::ResultPlaceholder,
-    //        Operand::Literal(STORAGE_CLASS_FUNCTION),
-    //        Operand::Instruction(float.downgrade()),
-    //    ]);
-    //    let var0 = Instruction::new(OP_VARIABLE, vec![
-    //        Operand::Instruction(pfloat.downgrade()),
-    //        Operand::ResultPlaceholder,
-    //        Operand::Literal(STORAGE_CLASS_FUNCTION),
-    //    ]);
-    //    let const0 = Instruction::new(OP_CONSTANT, vec![
-    //        Operand::Instruction(float.downgrade()),
-    //        Operand::ResultPlaceholder,
-    //        Operand::Literal(0),
-    //    ]);
-    //    let load_var0 = Instruction::new(OP_LOAD, vec![
-    //        Operand::Instruction(float.downgrade()),
-    //        Operand::ResultPlaceholder,
-    //        Operand::Instruction(var0.downgrade()),
-    //    ]);
-    //    let fadd0_load_var0 = Instruction::new(OP_FADD, vec![
-    //        Operand::Instruction(float.downgrade()),
-    //        Operand::ResultPlaceholder,
-    //        Operand::Instruction(load_var0.downgrade()),
-    //        Operand::Instruction(const0.downgrade()),
-    //    ]);
-    //    let store_fadd0_load_var0 = Instruction::new(OP_STORE, vec![
-    //        Operand::Instruction(var0.downgrade()),
-    //        Operand::Instruction(fadd0_load_var0.downgrade()),
-    //    ]);
-    //    let instrs = vec![
-    //        float,
-    //        var0,
-    //        const0,
-    //        load_var0.clone(),
-    //        fadd0_load_var0.clone(),
-    //        store_fadd0_load_var0.clone(),
-    //        load_var0,
-    //        fadd0_load_var0,
-    //        store_fadd0_load_var0,
-    //    ];
-    //    let rewrites = rewrite_instrs(&instrs);
-    //    assert_eq!(rewrites.len(), 6);
-    //}
 }

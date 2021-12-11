@@ -5,7 +5,6 @@ use liella::graph::Graph;
 use inline_spirv::inline_spirv;
 #[cfg(not(release))]
 use liella::test_utils::dump_spv;
-use liella::rewrite;
 
 fn print_graphviz_py<'a>(graph: &Graph) {
     println!("from graphviz import Digraph");
@@ -44,11 +43,6 @@ fn main() {
 
     let spv = Spv::try_from(spv).unwrap();
     let spv = Spirv::try_from(spv).unwrap();
-    let rewrite_spv = rewrite::rewrite_spirv(&spv);
-    println!("------");
-    println!("{:#?}", spv);
-    println!("------");
-    println!("{:#?}", rewrite_spv);
     let graph = Graph::try_from(&spv).unwrap();
     print_graphviz_py(&graph);
     println!("\"\"\"\n{:#?}\n\"\"\"", graph);

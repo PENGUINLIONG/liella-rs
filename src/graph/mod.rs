@@ -6,6 +6,8 @@ use std::fmt;
 use crate::spirv::{Instruction, InstructionRef, OpCode, Operand, Spirv};
 use crate::error::{LiellaError as Error, LiellaResult as Result};
 
+mod unfold_fn_vars;
+
 const OP_STORE: OpCode = 62;
 const OP_LABEL: OpCode = 248;
 const OP_BRANCH: u32 = 249;
@@ -314,6 +316,8 @@ impl Graph {
 }
 
 fn parse_grpah(spv: &Spirv) -> Result<Graph> {
+    let spv = unfold_fn_vars::apply(spv);
+
     let mut blocks: HashMap<InstructionRef, Block> = HashMap::new();
     let mut cur_block_beg: Option<usize> = None;
 
