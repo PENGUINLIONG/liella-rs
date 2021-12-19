@@ -184,6 +184,7 @@ impl SpirvDeserializer {
     /// Collect statment instructions (those doesn't have a reference ID).
     fn into_stmts_exprs(self) -> (Vec<Instruction>, Vec<Instruction>) {
         const OP_LABEL: u32 = 248;
+        const OP_FUNCTION: u32 = 54;
         let expr_idxs = self.id_map.into_iter()
             .map(|(_id, idx)| idx)
             .collect::<HashSet<_>>();
@@ -191,9 +192,10 @@ impl SpirvDeserializer {
         let mut exprs = Vec::new();
         for (idx, instr) in self.instrs.into_iter().enumerate() {
             if let Some(instr) = instr {
-                // TODO: (penguinliong) Find another way to probe labels to
-                // replace this dirty workaround.
-                if expr_idxs.contains(&idx) && instr.opcode() != OP_LABEL {
+                let is_marker_instr =
+                    instr.opcode() == OP_LABEL ||
+                    instr.opcode() == OP_FUNCTION;
+                if expr_idxs.contains(&idx) && !is_marker_instr {
                     exprs.push(instr);
                 } else {
                     stmts.push(instr);
