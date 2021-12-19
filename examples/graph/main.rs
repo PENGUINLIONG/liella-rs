@@ -6,21 +6,6 @@ use inline_spirv::inline_spirv;
 #[cfg(not(release))]
 use liella::test_utils::dump_spv;
 
-fn print_graphviz_py<'a>(graph: &Graph) {
-    println!("from graphviz import Digraph");
-    println!("g = Digraph()");
-    for block in graph.blocks() {
-        let name = format!("{:?}", block.clone().downgrade());
-        println!("g.node('{}')", name);
-    }
-    for edge in graph.edges() {
-        let src = format!("{:?}", edge.src);
-        let dst = format!("{:?}", edge.dst);
-        println!("g.edge('{}', '{}')", src, dst);
-    }
-    println!("g.view()");
-}
-
 fn main() {
     let spv: &'static [u32] = inline_spirv!(r#"
         #version 450
@@ -44,6 +29,5 @@ fn main() {
     let spv = Spv::try_from(spv).unwrap();
     let spv = Spirv::try_from(spv).unwrap();
     let graph = Graph::try_from(&spv).unwrap();
-    print_graphviz_py(&graph);
-    println!("\"\"\"\n{:#?}\n\"\"\"", graph);
+    println!("{:#?}", graph.nodes());
 }

@@ -1,8 +1,7 @@
 use std::collections::hash_map::{HashMap, Entry};
 use std::collections::hash_set::HashSet;
 use std::convert::TryFrom;
-use crate::graph::{Block, BlockRef, Graph, GraphEdge,
-    GraphLoop};
+use crate::graph::{Block, BlockRef, Graph, Edge, Loop};
 use crate::spirv::{OpCode, Instruction, InstructionRef, Operand, Spirv};
 
 const OP_LOAD: u32 = 61;
@@ -55,14 +54,14 @@ struct Rewriter {
     // correctly transition operands in multiple instructions referring to a
     // same load instruction.
     instr_map: HashMap<Instruction, Instruction>,
-    stmts: Vec<InstructionRef>,
+    instrs: Vec<InstructionRef>,
 }
 impl Rewriter {
     fn new() -> Self {
         Rewriter {
             var_states: HashMap::new(),
             instr_map: HashMap::new(),
-            stmts: Vec::new(),
+            instrs: Vec::new(),
         }
     }
     fn rewrite_impl(&mut self, instr: &Instruction) {
@@ -110,20 +109,19 @@ impl Rewriter {
     fn rewrite(&mut self, instr: &Instruction) {
         self.rewrite_impl(instr);
         if let Some(rewrite) = self.instr_map.get(&instr) {
-            self.stmts.push(rewrite.downgrade());
+            self.instrs.push(rewrite.downgrade());
         }
     }
 }
 
-pub fn apply(spv: &Spirv) -> Spirv {
-    let header = spv.header().clone();
+pub fn apply(instrs: &[InstructionRef]) -> (Vec<InstructionRef>, Vec<Instruction>) {
     let mut rewriter = Rewriter::new();
-    for stmt in spv.stmts().iter() {
-        rewriter.rewrite(&stmt.upgrade().unwrap());
+    for instr in instrs.iter() {
+        rewriter.rewrite(&instr.upgrade().unwrap());
     }
     let instr_pool = rewriter.instr_map.into_iter()
         .map(|(_instr, rewrite)| rewrite)
         .collect();
-    let stmts = rewriter.stmts;
-    Spirv::new(header, instr_pool, stmts)
+    let instrs = rewriter.instrs;
+    (instrs, instr_pool)
 }

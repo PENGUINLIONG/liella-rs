@@ -44,7 +44,7 @@ impl fmt::Debug for Operand {
         use Operand::*;
         match self {
             Literal(x) => x.fmt(f),
-            Instruction(x) => f.write_str(&make_instr_name_weak(&x.0)),
+            Instruction(x) => x.upgrade().unwrap().fmt(f),
             ResultPlaceholder => write!(f, "<result>"),
         }
     }
@@ -91,8 +91,9 @@ impl Instruction {
 }
 impl fmt::Debug for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct(&make_instr_name(&self.0))
-            .field("operands", &self.operands)
+        f.write_str(&format!("{} ", make_instr_name(&self.0)))?;
+        f.debug_list()
+            .entries(self.operands())
             .finish()
     }
 }
