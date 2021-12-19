@@ -1,7 +1,7 @@
 use std::convert::TryFrom;
 use liella::spv::Spv;
 use liella::spirv::Spirv;
-use liella::graph::Graph;
+use liella::graph::Context;
 use inline_spirv::inline_spirv;
 #[cfg(not(release))]
 use liella::test_utils::dump_spv;
@@ -30,6 +30,6 @@ fn main() {
 
     let spv = Spv::try_from(spv).unwrap();
     let spv = Spirv::try_from(spv).unwrap();
-    let graph = Graph::try_from(&spv).unwrap();
+    let graph = Context::try_from(&spv).unwrap();
     println!("{:#?}", graph.nodes());
 }

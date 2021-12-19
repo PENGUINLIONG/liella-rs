@@ -7,10 +7,12 @@ use crate::spirv::{Instruction, InstructionRef, OpCode, Operand, Spirv};
 use crate::error::{LiellaError as Error, LiellaResult as Result};
 
 mod block;
+mod graph;
 mod looop; // It's not a typo my friend.
 mod unfold_fn_vars;
 
 use block::{Block, BlockInner, BlockRef};
+use graph::{Graph, GraphInner, GraphRef};
 use looop::{Loop, LoopInner, LoopRef};
 
 const OP_STORE: OpCode = 62;
@@ -28,6 +30,7 @@ const OP_UNREACHABLE: u32 = 255;
 pub enum Node {
     Instruction(InstructionRef),
     Block(BlockRef),
+    Graph(GraphRef),
     Loop(LoopRef),
 }
 impl fmt::Debug for Node {
@@ -39,6 +42,9 @@ impl fmt::Debug for Node {
             Node::Block(block) => {
                 block.upgrade().unwrap().fmt(f)
             },
+            Node::Graph(graph) => {
+                graph.upgrade().unwrap().fmt(f)
+            }
             Node::Loop(looop) => {
                 looop.upgrade().unwrap().fmt(f)
             },
@@ -55,15 +61,16 @@ struct Edge {
 
 
 #[derive(Default)]
-struct GraphIntermediate {
+struct ContextIntermediate {
     nodes: Option<Vec<Node>>,
     edges: HashMap<BlockRef, Vec<BlockRef>>,
     instr_pool: Vec<Instruction>,
     block_pool: Vec<Block>,
+    graph_pool: Vec<Graph>,
     loop_pool: Vec<Loop>,
 }
-impl GraphIntermediate {
-    fn new(instrs: &[InstructionRef]) -> GraphIntermediate {
+impl ContextIntermediate {
+    fn new(instrs: &[InstructionRef]) -> ContextIntermediate {
         //let (instrs, instr_pool) = unfold_fn_vars::apply(instrs);
         let instr_pool = instrs.iter()
             .map(|x| x.upgrade().unwrap())
@@ -72,7 +79,7 @@ impl GraphIntermediate {
             .cloned()
             .map(|x| Node::Instruction(x))
             .collect();
-        GraphIntermediate {
+        ContextIntermediate {
             nodes: Some(nodes),
             instr_pool,
             ..Default::default()
@@ -120,29 +127,90 @@ impl GraphIntermediate {
         self.block_pool = block_pool;
         Ok(())
     }
-    fn collect_edges(&mut self) -> Result<()> {
-        let blocks = self.block_pool.iter()
-            .map(|x| (x.label_instr().clone(), x.downgrade()))
-            .collect::<HashMap<InstructionRef, BlockRef>>();
-        let mut out = HashMap::<BlockRef, Vec<BlockRef>>::new();
-        for block in self.block_pool.iter() {
-            let src = block.downgrade();
-            let branch_instr = block.branch_instr().upgrade().unwrap();
-            for operand in branch_instr.operands() {
-                if let Operand::Instruction(dst_label) = operand {
-                    // Here we assume that if `dst_label` can be found as keys
-                    // in `blocks`, it is guaranteed to be a `OpLabel`.
-                    if let Some(dst) = blocks.get(dst_label) {
-                        out.entry(src.clone()).or_default().push(dst.clone());
-                    }
+
+    fn elevate_graphs(&mut self) -> Result<()> {
+        let dst_blocks = self.block_pool.iter()
+            .map(|x| {
+                let branch_instr = x.branch_instr().upgrade().unwrap();
+                branch_instr.operands().iter()
+                    .filter_map(|x| {
+                        if let Operand::Instruction(dst) = x {
+                            self.block_pool.iter().find(|x| {
+                                x.label_instr() == dst
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let edges = self.block_pool.iter()
+            .cloned()
+            .zip(dst_blocks)
+            .collect::<HashMap<_, _>>();
+
+        // Step 1: Find the provoking blocks, which don't have edges pointing to
+        // them. A provoking block is usually the first block in a function
+        // which is the root of a graph.
+        let provoking_blocks = {
+            let src_blocks = edges.keys()
+                .cloned()
+                .collect::<HashSet<_>>();
+            let dst_blocks = edges.values()
+                .flat_map(|x| x.iter().cloned())
+                .collect::<HashSet<_>>();
+            src_blocks.difference(&dst_blocks)
+                .cloned()
+                .collect::<HashSet<_>>()
+        };
+
+        // Step 2: Capture all directly and indirectly referenced blocks and
+        // build a self-enclosed graph.
+        fn collect_graph_blocks_impl(
+            src_block: &Block,
+            edges: &HashMap<Block, Vec<Block>>,
+            out: &mut HashSet<BlockRef>
+        ) {
+            for dst_block in edges.get(src_block).unwrap() {
+                if out.insert(dst_block.downgrade()) {
+                    collect_graph_blocks_impl(dst_block, edges, out);
                 }
             }
         }
-        self.edges = out;
+        let graphs = provoking_blocks.iter()
+            .map(|x| {
+                let mut out = HashSet::new();
+                out.insert(x.downgrade());
+                collect_graph_blocks_impl(x, &edges, &mut out);
+                (x.clone(), Graph::from(out))
+            })
+            .collect::<HashMap<Block, Graph>>();
+
+        let nodes = self.nodes.take().unwrap().into_iter()
+            .filter_map(|node| {
+                if let Node::Block(block) = node {
+                    let block = block.upgrade().unwrap();
+                    if provoking_blocks.contains(&block) {
+                        let graph = graphs.get(&block).unwrap().downgrade();
+                        let graph = Node::Graph(graph);
+                        Some(graph)
+                    } else {
+                        // Hide non-provoking blocks because they have been
+                        // represented by graphs of provoking blocks.
+                        None
+                    }
+                } else {
+                    Some(node)
+                }
+            })
+            .collect::<Vec<_>>();
+        self.nodes = Some(nodes);
+        self.graph_pool = graphs.into_values().collect();
+
         Ok(())
     }
-
-
 
     fn collect_loops_impl(
         &self,
@@ -243,38 +311,40 @@ impl GraphIntermediate {
 
 
 #[derive(Debug)]
-pub struct Graph {
+pub struct Context {
     nodes: Vec<Node>,
     instr_pool: Vec<Instruction>,
     block_pool: Vec<Block>,
+    graph_pool: Vec<Graph>,
     loop_pool: Vec<Loop>,
 }
-impl Graph {
+impl Context {
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
 }
-impl From<GraphIntermediate> for Graph {
-    fn from(x: GraphIntermediate) -> Graph {
-        Graph {
+impl From<ContextIntermediate> for Context {
+    fn from(x: ContextIntermediate) -> Context {
+        Context {
             nodes: x.nodes.unwrap(),
             instr_pool: x.instr_pool,
             block_pool: x.block_pool,
+            graph_pool: x.graph_pool,
             loop_pool: x.loop_pool,
         }
     }
 }
 
-fn parse_grpah(spv: &Spirv) -> Result<Graph> {
-    let mut itm = GraphIntermediate::new(spv.stmts());
+fn parse_grpah(spv: &Spirv) -> Result<Context> {
+    let mut itm = ContextIntermediate::new(spv.stmts());
     itm.elevate_blocks()?;
-    itm.collect_edges()?;
-    itm.elevate_loops()?;
+    itm.elevate_graphs()?;
+    //itm.elevate_loops()?;
 
     Ok(itm.into())
 }
 
-impl TryFrom<&Spirv> for Graph {
+impl TryFrom<&Spirv> for Context {
     type Error = Error;
     fn try_from(spv: &Spirv) -> Result<Self> {
         let out = parse_grpah(spv)?;
@@ -298,6 +368,6 @@ mod tests {
         "#, vert, vulkan1_0);
         let spv = crate::spv::Spv::try_from(spv).unwrap();
         let spv = Spirv::try_from(spv).unwrap();
-        let graph = Graph::try_from(&spv).unwrap();
+        let graph = Context::try_from(&spv).unwrap();
     }
 }
