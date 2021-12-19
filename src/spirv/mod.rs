@@ -181,28 +181,17 @@ impl SpirvDeserializer {
             Ok(false)
         }
     }
-    /// Collect statment instructions (those doesn't have a reference ID).
-    fn into_stmts_exprs(self) -> (Vec<Instruction>, Vec<Instruction>) {
+    fn into_instrs(self) -> Vec<Instruction> {
         const OP_LABEL: u32 = 248;
         const OP_FUNCTION: u32 = 54;
         let expr_idxs = self.id_map.into_iter()
             .map(|(_id, idx)| idx)
             .collect::<HashSet<_>>();
-        let mut stmts = Vec::new();
-        let mut exprs = Vec::new();
-        for (idx, instr) in self.instrs.into_iter().enumerate() {
-            if let Some(instr) = instr {
-                let is_marker_instr =
-                    instr.opcode() == OP_LABEL ||
-                    instr.opcode() == OP_FUNCTION;
-                if expr_idxs.contains(&idx) && !is_marker_instr {
-                    exprs.push(instr);
-                } else {
-                    stmts.push(instr);
-                }
-            }
-        }
-        (stmts, exprs)
+
+        let out = self.instrs.into_iter()
+            .filter_map(|x| x)
+            .collect::<Vec<_>>();
+        out
     }
 }
 
@@ -292,9 +281,9 @@ impl<'a> TryFrom<Spv<'a>> for Spirv {
         if !done {
             return Err(Error::UNUSUAL_REFERENCE_COMPLEXITY);
         }
-        let (stmts, exprs) = de.into_stmts_exprs();
-        let stmt_refs = stmts.iter().map(|x| x.downgrade()).collect::<Vec<_>>();
-        let instr_pool = stmts.into_iter().chain(exprs).collect();
+        let instrs = de.into_instrs();
+        let stmt_refs = instrs.iter().map(|x| x.downgrade()).collect::<Vec<_>>();
+        let instr_pool = instrs.into_iter().collect::<HashSet<_>>();
 
         let out = Spirv {
             header: spv.header().clone(),

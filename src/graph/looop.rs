@@ -64,6 +64,17 @@ impl From<Vec<BlockRef>> for Loop {
         Loop(Rc::new(inner))
     }
 }
+impl PartialEq for Loop {
+    fn eq(&self, b: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &b.0)
+    }
+}
+impl Eq for Loop {}
+impl Hash for Loop {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (Rc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
 
 #[derive(Clone)]
 pub struct LoopRef(Weak<LoopInner>);
@@ -76,5 +87,16 @@ impl LoopRef {
 impl fmt::Debug for LoopRef {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str(&make_loop_name_weak(&self.0))
+    }
+}
+impl PartialEq for LoopRef {
+    fn eq(&self, b: &Self) -> bool {
+        self.0.ptr_eq(&b.0)
+    }
+}
+impl Eq for LoopRef {}
+impl Hash for LoopRef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.0.as_ptr() as usize).hash(state);
     }
 }

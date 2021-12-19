@@ -15,7 +15,9 @@ fn main() {
             int y = 12345;
             {
                 for (int i = pred; i < 5; ++i) {
-                    y += 1;
+                    for (int j = pred; j < 7; ++j) {
+                        y += 1;
+                    }
                     y += 2;
                 }
             }

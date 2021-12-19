@@ -24,7 +24,7 @@ const OP_RETURN_VALUE: u32 = 254;
 const OP_UNREACHABLE: u32 = 255;
 
 
-#[derive(Clone)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub enum Node {
     Instruction(InstructionRef),
     Block(BlockRef),
