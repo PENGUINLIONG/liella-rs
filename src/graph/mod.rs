@@ -64,7 +64,10 @@ struct GraphIntermediate {
 }
 impl GraphIntermediate {
     fn new(instrs: &[InstructionRef]) -> GraphIntermediate {
-        let (instrs, instr_pool) = unfold_fn_vars::apply(instrs);
+        //let (instrs, instr_pool) = unfold_fn_vars::apply(instrs);
+        let instr_pool = instrs.iter()
+            .map(|x| x.upgrade().unwrap())
+            .collect::<Vec<_>>();
         let nodes = instrs.iter()
             .cloned()
             .map(|x| Node::Instruction(x))
@@ -100,7 +103,7 @@ impl GraphIntermediate {
                         let block = Block::from(instrs);
                         out.push(Node::Block(block.downgrade()));
                         block_pool.push(block);
-                    }
+                    },
                     _ => {
                         if let Some(instrs) = block_instrs.as_mut() {
                             instrs.push(instr.clone());
