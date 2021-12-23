@@ -53,17 +53,9 @@ impl fmt::Debug for Node {
 }
 
 
-#[derive(Clone, Debug)]
-struct Edge {
-    pub src: BlockRef,
-    pub dst: BlockRef,
-}
-
-
 #[derive(Default)]
 struct ContextIntermediate {
     nodes: Option<Vec<Node>>,
-    edges: HashMap<BlockRef, Vec<BlockRef>>,
     instr_pool: Vec<Instruction>,
     block_pool: Vec<Block>,
     graph_pool: Vec<Graph>,
@@ -212,85 +204,107 @@ impl ContextIntermediate {
         Ok(())
     }
 
-    fn collect_loops_impl(
-        &self,
-        block_stack: &mut Vec<BlockRef>,
-        out: &mut Vec<Loop>,
-    ) -> Result<()> {
-        let src_block = block_stack.last().unwrap().clone();
-        if let Some(dst_blocks) = self.edges.get(&src_block) {
-            for dst_block in dst_blocks {
-                let mut is_back_edge = false;
-                let loops = block_stack.iter()
-                    .enumerate()
-                    .rev() // `rev` to find the smallest structured loop.
-                    .filter_map(|(i, ancester_block)| {
-                        if ancester_block == dst_block {
-                            is_back_edge = true;
-                            Some(i)
-                        } else { None }
-                    })
-                    .map(|i| Loop::from(block_stack[i..].to_owned()));
-                out.extend(loops);
-
-                if !is_back_edge {
-                    block_stack.push(dst_block.clone());
-                    self.collect_loops_impl(block_stack, out)?;
-                    block_stack.pop();
-                }
-            }
-        }
-        Ok(())
-    }
     fn elevate_loops(&mut self) -> Result<()> {
-        let src_blocks = self.edges.keys()
-            .cloned()
-            .collect::<HashSet<_>>();
-        let dst_blocks = self.edges.values()
-            .flatten()
-            .cloned()
-            .collect::<HashSet<_>>();
-        let provoking_blocks = src_blocks.difference(&dst_blocks);
+        use std::collections::hash_map::{Entry, OccupiedEntry, VacantEntry};
 
-        let mut loop_pool = Vec::new();
-        for provoking_block in provoking_blocks {
-            let mut block_stack = vec![provoking_block.clone()];
-            self.collect_loops_impl(&mut block_stack, &mut loop_pool)?;
-        }
+        let mut graph_loops = HashMap::<GraphRef, Vec<LoopRef>>::new();
+        for node in self.nodes.take().unwrap() {
+            if let Node::Graph(graph) = node {
+                let graph = graph.upgrade().unwrap();
+                let edges = graph.edges();
 
-        let mut loops_by_len = BTreeMap::<usize, HashMap<BlockRef, Loop>>::new();
-        for looop in loop_pool.iter() {
-            loops_by_len.entry(looop.len())
-                .or_default()
-                .insert(looop.provoking_block().clone(), looop.clone());
-        }
+                let mut in_degs = HashMap::<BlockRef, u32>::new();
+                let mut out_degs = HashMap::<BlockRef, u32>::new();
+                for (src_block, dst_block) in edges.iter() {
+                    *out_degs.entry(src_block.clone()).or_default() += 1;
+                    *in_degs.entry(dst_block.clone()).or_default() += 1;
+                }
 
-        let mut nodes = self.nodes.take().unwrap();
-        let mut visited_blocks = HashSet::new();
-        for (_, loops) in loops_by_len {
-            nodes = nodes.into_iter()
-                .filter_map(|node| {
-                    match node {
-                        Node::Block(block) => {
-                            if !visited_blocks.contains(&block) {
-                                if let Some(looop) = loops.get(&block) {
-                                    visited_blocks.extend(looop.blocks().iter().cloned());
-                                    let node = Node::Loop(looop.downgrade());
-                                    Some(node)
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        },
-                        node => Some(node),
+                let mut diverges = Vec::new();
+                let mut converges = Vec::new();
+                in_degs.keys()
+                    .for_each(|x| {
+                        let in_deg = in_degs.get(&x).cloned().unwrap_or(1);
+                        let out_deg = out_degs.get(&x).cloned().unwrap_or(1);
+                        if in_deg < out_deg {
+                            diverges.push(x.clone());
+                        }
+                        if in_deg > out_deg {
+                            converges.push(x.clone());
+                        }
+                    });
+
+                println!("{:#?}", edges);
+
+                println!("{:?}", diverges);
+                println!("{:?}", converges);
+
+                fn find_loop_impl(
+                    graph: &Graph,
+                    stack: &mut Vec<BlockRef>,
+                ) -> bool {
+                    let target = stack.iter().next().unwrap().clone();
+                    let src = stack.iter().last().unwrap().clone();
+                    for dst in graph.get_dst_blocks(&src) {
+                        stack.push(dst.clone());
+                        if &target == dst || find_loop_impl(graph, stack) {
+                            return true;
+                        }
+                        stack.pop();
                     }
-                })
-                .collect();
+                    false
+                }
+                fn find_loop(
+                    graph: &Graph,
+                    src: &BlockRef,
+                ) -> Option<Vec<BlockRef>> {
+                    let mut stack = vec![src.clone()];
+                    if find_loop_impl(graph, &mut stack) {
+                        stack.pop();
+                        Some(stack)
+                    } else {
+                        None
+                    }
+                }
+
+                let mut found_loops = HashSet::<Vec<BlockRef>>::new();
+                while let Some(mut min_loop) = diverges.iter()
+                    .filter_map(|diverge| {
+                        if let Some(looop) = find_loop(&graph, diverge) {
+                            if !found_loops.contains(&looop) {
+                                found_loops.insert(looop.clone());
+                                return Some(looop)
+                            }
+                        }
+                        None
+                    })
+                    .min_by_key(|x| x.len())
+                {
+                    if let Some(iconverge) = min_loop.iter()
+                        .position(|x| converges.contains(x))
+                    {
+                        let header = min_loop.drain(..iconverge)
+                            .collect::<Vec<_>>();
+                        let select = min_loop.remove(0);
+                        let body = min_loop;
+                        println!("{:?}-{:?}-{:?}", header, select, body);
+                    } else {
+                        // If a converge point cannot be found, it's not a
+                        // structured loop. We don't handle such case.
+                    }
+                }
+
+                let loops: Vec<Loop> = found_loops.into_iter()
+                    .map(Loop::from)
+                    .collect();
+                let loop_refs = loops.iter()
+                    .map(Loop::downgrade)
+                    .collect::<Vec<LoopRef>>();
+                graph_loops.insert(graph.downgrade(), loop_refs);
+            }
+
         }
-        self.nodes = Some(nodes);
-        self.loop_pool = loop_pool;
+
         Ok(())
     }
 }
@@ -339,7 +353,7 @@ fn parse_grpah(spv: &Spirv) -> Result<Context> {
     let mut itm = ContextIntermediate::new(spv.stmts());
     itm.elevate_blocks()?;
     itm.elevate_graphs()?;
-    //itm.elevate_loops()?;
+    itm.elevate_loops()?;
 
     Ok(itm.into())
 }

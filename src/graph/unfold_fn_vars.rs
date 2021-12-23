@@ -1,7 +1,7 @@
 use std::collections::hash_map::{HashMap, Entry};
 use std::collections::hash_set::HashSet;
 use std::convert::TryFrom;
-use crate::graph::{Block, BlockRef, Graph, Edge, Loop};
+use crate::graph::{Block, BlockRef, Graph, Loop};
 use crate::spirv::{OpCode, Instruction, InstructionRef, Operand, Spirv};
 
 const OP_LOAD: u32 = 61;

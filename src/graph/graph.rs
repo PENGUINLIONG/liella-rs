@@ -25,11 +25,23 @@ impl GraphInner {
     pub fn blocks(&self) -> &[BlockRef] {
         &self.blocks
     }
+    pub fn edges<'a>(&'a self) -> Vec<(BlockRef, BlockRef)> {
+        self.edges
+            .iter()
+            .flat_map(|(src_block, dst_blocks)| {
+                let src_block = src_block.clone();
+                dst_blocks.iter()
+                    .map(move |dst_block| {
+                        (src_block.clone(), dst_block.clone())
+                    })
+            })
+            .collect()
+    }
     pub fn provoking_block(&self) -> &BlockRef {
         self.blocks.first().unwrap()
     }
 
-    pub fn get_dst(&self, src: &BlockRef) -> &[BlockRef] {
+    pub fn get_dst_blocks(&self, src: &BlockRef) -> &[BlockRef] {
         self.edges.get(src)
             .map(|x| x as &[BlockRef])
             .unwrap_or(&[] as &[BlockRef])
