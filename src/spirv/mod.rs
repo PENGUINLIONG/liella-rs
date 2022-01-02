@@ -16,17 +16,6 @@ pub type OpCode = crate::spv::OpCode;
 
 type SpvId = crate::spv::SpvId;
 
-fn make_instr_name(inner: &Rc<InstructionInner>) -> String {
-    format!("{}@{:016x}",
-        gen::opcode2name(inner.opcode),
-        Rc::as_ptr(inner) as *const InstructionInner as usize)
-}
-fn make_instr_name_weak(inner: &Weak<InstructionInner>) -> String {
-    inner.upgrade()
-        .map(|x| make_instr_name(&x))
-        .unwrap_or("Instruction@DROPPED".to_owned())
-}
-
 #[derive(Clone)]
 pub enum Operand {
     Literal(u32),
@@ -46,7 +35,7 @@ impl fmt::Debug for Operand {
         use Operand::*;
         match self {
             Literal(x) => x.fmt(f),
-            Instruction(x) => x.fmt(f),
+            Instruction(x) => x.upgrade().fmt(f),
             ResultPlaceholder => write!(f, "<result>"),
         }
     }
@@ -58,12 +47,19 @@ impl fmt::Debug for Operand {
 
 
 
-#[derive(Debug)]
 pub struct Instruction {
     pub opcode: OpCode,
     pub operands: Vec<Operand>,
     /// Next instruction. Should be `None` at the end.
     pub next: Option<NodeRef>,
+}
+impl fmt::Debug for Instruction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(gen::opcode2name(self.opcode))?;
+        f.debug_list()
+            .entries(&self.operands)
+            .finish()
+    }
 }
 
 
@@ -81,7 +77,7 @@ impl NodeInner {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Node(Rc<RefCell<NodeInner>>);
 impl Node {
     pub fn rewrite<F: FnMut(&Node) -> Option<Node>>(&mut self, mut rewriter: F) {
@@ -105,7 +101,12 @@ impl Node {
         (*self.0).borrow_mut()
     }
 }
-#[derive(Clone, Debug)]
+impl fmt::Debug for Node {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.borrow().fmt(f)
+    }
+}
+#[derive(Clone)]
 pub struct NodeRef(Weak<RefCell<NodeInner>>);
 impl NodeRef {
     pub fn upgrade(&self) -> Node {
@@ -293,4 +294,14 @@ pub fn spv2graph<'a>(ctxt: &mut Context, spv: Spv<'a>) -> NodeRef {
         instrs[i - 1].upgrade().borrow_mut().as_instr_mut().unwrap().next = next;
     }
     instrs[0].clone()
+}
+
+pub fn visit<F>(root: NodeRef, mut visitor: F) where F: FnMut(Node) + Clone {
+    let mut pending = Vec::new();
+    let root = root.upgrade();
+    root.collect_children(&mut pending);
+    for child in pending {
+        visit(child, visitor.clone());
+    }
+    visitor(root);
 }

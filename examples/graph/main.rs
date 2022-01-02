@@ -1,6 +1,6 @@
 use std::convert::TryFrom;
 use liella::spv::Spv;
-use liella::spirv::{Context, spv2graph};
+use liella::spirv::{Context, spv2graph, visit};
 use inline_spirv::inline_spirv;
 #[cfg(not(release))]
 use liella::test_utils::dump_spv;
@@ -29,5 +29,6 @@ fn main() {
 
     let spv = Spv::try_from(spv).unwrap();
     let mut ctxt = Context::new();
-    spv2graph(&mut ctxt, spv);
+    let root = spv2graph(&mut ctxt, spv);
+    visit(root, |node| { println!("{:#?}", node); })
 }
