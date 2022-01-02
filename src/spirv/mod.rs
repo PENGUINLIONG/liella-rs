@@ -1,5 +1,7 @@
 use std::ops::{Deref, DerefMut};
 use std::cmp::{PartialEq, Eq};
+use std::borrow::{Borrow, BorrowMut};
+use std::cell::{RefCell};
 use std::rc::{Rc, Weak};
 use std::fmt;
 use std::collections::{HashMap, HashSet};
@@ -28,15 +30,15 @@ fn make_instr_name_weak(inner: &Weak<InstructionInner>) -> String {
 #[derive(Clone)]
 pub enum Operand {
     Literal(u32),
-    Instruction(InstructionRef),
+    Instruction(NodeRef),
     ResultPlaceholder,
 }
 impl Operand {
     pub fn as_lit(&self) -> Option<u32> {
         if let Self::Literal(x) = self { Some(*x) } else { None }
     }
-    pub fn as_instr(&self) -> Option<InstructionRef> {
-        if let Self::Instruction(x) = self { Some(x.clone()) } else { None }
+    pub fn as_instr(&self) -> Option<&NodeRef> {
+        if let Self::Instruction(x) = self { Some(x) } else { None }
     }
 }
 impl fmt::Debug for Operand {
@@ -44,11 +46,99 @@ impl fmt::Debug for Operand {
         use Operand::*;
         match self {
             Literal(x) => x.fmt(f),
-            Instruction(x) => x.upgrade().unwrap().fmt(f),
+            Instruction(x) => x.fmt(f),
             ResultPlaceholder => write!(f, "<result>"),
         }
     }
 }
+
+
+
+
+
+
+
+#[derive(Debug)]
+pub struct Instruction {
+    pub opcode: OpCode,
+    pub operands: Vec<Operand>,
+    /// Next instruction. Should be `None` at the end.
+    pub next: Option<NodeRef>,
+}
+
+
+
+#[derive(Debug)]
+pub enum NodeInner {
+    Instruction(Instruction),
+}
+impl NodeInner {
+    pub fn as_instr(&self) -> Option<&Instruction> {
+        if let Self::Instruction(out) = self { Some(out) } else { None }
+    }
+    pub fn as_instr_mut(&mut self) -> Option<&mut Instruction> {
+        if let Self::Instruction(out) = self { Some(out) } else { None }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Node(Rc<RefCell<NodeInner>>);
+impl Node {
+    pub fn rewrite<F: FnMut(&Node) -> Option<Node>>(&mut self, mut rewriter: F) {
+        if let Some(x) = rewriter(self) {
+            *self = x;
+        }
+    }
+
+    pub fn collect_children(&self, children: &mut Vec<NodeRef>) {
+        match &*self.borrow() {
+            NodeInner::Instruction(x) => {
+                children.extend(x.next.clone().into_iter());
+            },
+        }
+    }
+
+    pub fn borrow(&self) -> std::cell::Ref<'_, NodeInner> {
+        (*self.0).borrow()
+    }
+    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, NodeInner> {
+        (*self.0).borrow_mut()
+    }
+}
+#[derive(Clone, Debug)]
+pub struct NodeRef(Weak<RefCell<NodeInner>>);
+impl NodeRef {
+    pub fn upgrade(&self) -> Node {
+        Node(self.0.upgrade().unwrap())
+    }
+}
+
+
+
+
+
+
+pub struct Context {
+    allocs: Vec<Node>,
+}
+impl Context {
+    pub fn new() -> Context {
+        Context {
+            allocs: Vec::new(),
+        }
+    }
+    pub fn alloc_instr(&mut self, instr: Instruction) -> NodeRef {
+        let rc = Rc::new(RefCell::new(NodeInner::Instruction(instr)));
+        let rv = NodeRef(Rc::downgrade(&rc));
+        let alloc = Node(rc);
+        self.allocs.push(alloc);
+        rv
+    }
+}
+
+
+
+
 
 pub struct InstructionInner {
     opcode: OpCode,
@@ -69,83 +159,21 @@ impl InstructionInner {
     }
 }
 
-#[derive(Clone)]
-pub struct Instruction(Rc<InstructionInner>);
-impl Deref for Instruction {
-    type Target = InstructionInner;
-    fn deref(&self) -> &Self::Target { &self.0 }
-}
-impl DerefMut for Instruction {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        Rc::get_mut(&mut self.0).unwrap()
-    }
-}
-impl Instruction {
-    pub fn new(opcode: OpCode, operands: Vec<Operand>) -> Instruction {
-        let inner = InstructionInner { opcode, operands };
-        Instruction(Rc::new(inner))
-    }
-    pub fn downgrade(&self) -> InstructionRef {
-        InstructionRef(Rc::downgrade(&self.0))
-    }
-}
-impl fmt::Debug for Instruction {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(&format!("{} ", make_instr_name(&self.0)))?;
-        f.debug_list()
-            .entries(self.operands())
-            .finish()
-    }
-}
-impl PartialEq for Instruction {
-    fn eq(&self, b: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &b.0)
-    }
-}
-impl Eq for Instruction {}
-impl std::hash::Hash for Instruction {
-    fn hash<H>(&self, state: &mut H) where H: std::hash::Hasher {
-        state.write_usize(Rc::as_ptr(&self.0) as usize);
-    }
-}
-
-#[derive(Clone)]
-pub struct InstructionRef(Weak<InstructionInner>);
-impl InstructionRef {
-    pub fn upgrade(&self) -> Option<Instruction> {
-        self.0.upgrade().map(|x| Instruction(x))
-    }
-}
-impl fmt::Debug for InstructionRef {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(&make_instr_name_weak(&self.0))
-    }
-}
-impl PartialEq for InstructionRef {
-    fn eq(&self, b: &Self) -> bool {
-        self.0.ptr_eq(&b.0)
-    }
-}
-impl Eq for InstructionRef {}
-impl std::hash::Hash for InstructionRef {
-    fn hash<H>(&self, state: &mut H) where H: std::hash::Hasher {
-        state.write_usize(self.0.as_ptr() as usize);
-    }
-}
-
 type InstrIdx = usize;
-pub(crate) struct SpirvDeserializer {
-    instrs: Vec<Option<Instruction>>,
+pub(crate) struct SpirvDeserializer<'a> {
+    ctxt: &'a mut Context,
+    instrs: Vec<Option<NodeRef>>,
     id_map: HashMap<SpvId, InstrIdx>,
 }
-impl SpirvDeserializer {
-    fn new(ninstr: usize) -> Self {
+impl<'a> SpirvDeserializer<'a> {
+    fn new(ctxt: &'a mut Context, ninstr: usize) -> Self {
         SpirvDeserializer {
+            ctxt,
             instrs: std::iter::repeat(None).take(ninstr).collect(),
             id_map: HashMap::new(),
         }
     }
-    fn get_instr_by_id(&self, id: SpvId) -> Option<&Instruction> {
+    fn get_instr_by_id(&self, id: SpvId) -> Option<&NodeRef> {
         if let Some(idx) = self.id_map.get(&id) {
             if let Some(instr) = self.instrs.get(*idx as usize) {
                 instr.as_ref()
@@ -164,7 +192,7 @@ impl SpirvDeserializer {
         use std::collections::hash_map::Entry;
         if self.instrs[idx].is_some() { return Ok(true); }
         if let Some((id, instr)) = gen::deserialize_instr(self, raw_instr)? {
-            self.instrs[idx] = Some(instr);
+            self.instrs[idx] = Some(self.ctxt.alloc_instr(instr));
             if id != 0 {
                 match self.id_map.entry(id) {
                     Entry::Occupied(_) => {
@@ -181,7 +209,7 @@ impl SpirvDeserializer {
             Ok(false)
         }
     }
-    fn into_instrs(self) -> Vec<Instruction> {
+    fn into_instrs(self) -> Vec<NodeRef> {
         const OP_LABEL: u32 = 248;
         const OP_FUNCTION: u32 = 54;
         let expr_idxs = self.id_map.into_iter()
@@ -196,12 +224,16 @@ impl SpirvDeserializer {
 }
 
 pub(crate) struct InstructionBuilder<'a> {
-    ctxt: &'a SpirvDeserializer,
-    inner: Option<InstructionInner>,
+    ctxt: &'a SpirvDeserializer<'a>,
+    inner: Option<Instruction>,
 }
 impl<'a> InstructionBuilder<'a> {
     pub fn new(ctxt: &'a SpirvDeserializer, opcode: OpCode) -> Self {
-        let inner = InstructionInner { opcode, operands: Default::default() };
+        let inner = Instruction {
+            opcode,
+            operands: Default::default(),
+            next: None
+        };
         InstructionBuilder { ctxt, inner: Some(inner) }
     }
     pub fn lit(&mut self, x: u32) {
@@ -213,7 +245,7 @@ impl<'a> InstructionBuilder<'a> {
     pub fn id(&mut self, id: SpvId) {
         if let Some(x) = self.ctxt.get_instr_by_id(id) {
             if let Some(inner) = self.inner.as_mut() {
-                let operand = Operand::Instruction(x.clone().downgrade());
+                let operand = Operand::Instruction(x.clone());
                 inner.operands.push(operand);
             }
         } else {
@@ -227,7 +259,7 @@ impl<'a> InstructionBuilder<'a> {
         }
     }
     pub fn build(self) -> Option<Instruction> {
-        self.inner.map(|x| Instruction(Rc::new(x)))
+        self.inner
     }
 }
 fn is_line_debug_instr(instr: &Instr) -> bool {
@@ -239,102 +271,26 @@ fn is_line_debug_instr(instr: &Instr) -> bool {
     }
 }
 
-#[derive(Clone)]
-pub struct Spirv {
-    /// SPIR-V header.
-    header: SpirvHeader,
-    /// Instruction pool to keep at least one reference count to the
-    /// allocations. There is no guarantee the instructions are kept in order in
-    /// `instr_pool`. Any demand on instruction ordering should be redirected to
-    /// `stmts`.
-    instr_pool: HashSet<Instruction>,
-    /// Statements, which are instructions that don't have other instructions
-    /// refering to them.
-    stmts: Vec<InstructionRef>,
-}
-impl Spirv {
-    pub fn new(
-        header: SpirvHeader,
-        instr_pool: HashSet<Instruction>,
-        stmts: Vec<InstructionRef>
-    ) -> Self {
-        Spirv { header, instr_pool, stmts }
-    }
-    pub fn header(&self) -> &SpirvHeader { &self.header }
-    pub fn stmts(&self) -> &[InstructionRef] { &self.stmts }
-}
-impl<'a> TryFrom<Spv<'a>> for Spirv {
-    type Error = Error;
-    fn try_from(spv: Spv<'a>) -> Result<Spirv> {
-        let mut de = SpirvDeserializer::new(spv.instrs().len());
-        let mut done = true;
-        for _ in 0..100 {
-            done = true;
-            for (i, instr) in spv.instrs().iter().enumerate() {
-                // Ignore some in-function debug instructions because they can
-                // show up before `OpLabel` which break other processing.
-                if is_line_debug_instr(instr) { continue; }
-                done &= de.deserialize_instr(i, instr)?;
-            }
-            if done { break; }
+pub fn spv2graph<'a>(ctxt: &mut Context, spv: Spv<'a>) -> NodeRef {
+    let mut de = SpirvDeserializer::new(ctxt, spv.instrs().len());
+    let mut done = true;
+    for _ in 0..100 {
+        done = true;
+        for (i, instr) in spv.instrs().iter().enumerate() {
+            // Ignore some in-function debug instructions because they can
+            // show up before `OpLabel` which break other processing.
+            if is_line_debug_instr(instr) { continue; }
+            done &= de.deserialize_instr(i, instr).unwrap();
         }
-        if !done {
-            return Err(Error::UNUSUAL_REFERENCE_COMPLEXITY);
-        }
-        let instrs = de.into_instrs();
-        let stmt_refs = instrs.iter().map(|x| x.downgrade()).collect::<Vec<_>>();
-        let instr_pool = instrs.into_iter().collect::<HashSet<_>>();
-
-        let out = Spirv {
-            header: spv.header().clone(),
-            instr_pool,
-            stmts: stmt_refs
-        };
-        Ok(out)
+        if done { break; }
     }
-}
-impl fmt::Debug for Spirv {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fn fmt_instr_lisp(instr: &InstructionRef) -> String {
-            let instr = instr.upgrade().unwrap();
-            let operands_lit_it = instr.operands().iter()
-                .map(|operand| {
-                    match operand {
-                        Operand::Instruction(x) => fmt_instr_lisp(&x),
-                        Operand::Literal(x) => format!("{}", x),
-                        Operand::ResultPlaceholder => "<result>".to_owned(),
-                    }
-                });
-            let mut segs = vec![instr.opname().to_owned()];
-            segs.extend(operands_lit_it);
-
-            let lit = segs.join(" ");
-            format!("({})", lit)
-        }
-
-        f.debug_list()
-            .entries(self.stmts().iter().map(fmt_instr_lisp))
-            .finish()
+    if !done {
+        panic!("unexpected reference complexity");
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use inline_spirv::inline_spirv;
-    #[test]
-    fn test_parse() {
-        let spv: &'static [u32] =
-            inline_spirv!("#version 450\nvoid main() {}", comp, vulkan1_0);
-        let spv = Spv::try_from(spv).unwrap();
-        let _operand_lens1: Vec<_> = spv.instrs()
-            .iter()
-            .map(|x| x.len())
-            .collect();
-        let spv = Spirv::try_from(spv).unwrap();
-        let _operand_lens2: Vec<_> = spv.stmts()
-            .iter()
-            .map(|x| x.upgrade().unwrap().len())
-            .collect();
+    let instrs = de.into_instrs();
+    for i in 1..instrs.len() {
+        let next = Some(instrs[i].clone());
+        instrs[i - 1].upgrade().borrow_mut().as_instr_mut().unwrap().next = next;
     }
+    instrs[0].clone()
 }
