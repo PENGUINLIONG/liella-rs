@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
 use crate::spirv::{Instruction, InstructionRef, Operand};
 use crate::graph::{Block, BlockRef};
-use super::OP_LABEL;
+use super::{OP_LABEL};
 
 fn make_graph_name(inner: &Rc<GraphInner>) -> String {
     format!("Graph@{:016x}",

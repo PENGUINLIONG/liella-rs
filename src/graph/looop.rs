@@ -16,7 +16,13 @@ fn make_loop_name_weak(inner: &Weak<LoopInner>) -> String {
 }
 
 pub struct LoopInner {
-    blocks: Vec<BlockRef>,
+    /// From the converge node to the diverge node, excluding the diverge node.
+    /// The first block is the provoking node.
+    forward_blocks: Vec<BlockRef>,
+    /// From the diverge node to the converge node, excluding the converge node.
+    /// The first block is the branching node deciding whether the loop should
+    /// continue.
+    backward_blocks: Vec<BlockRef>,
 }
 
 #[derive(Clone)]
@@ -33,14 +39,32 @@ impl DerefMut for Loop {
     }
 }
 impl Loop {
+    pub fn new(
+        forward_blocks: Vec<BlockRef>,
+        backward_blocks: Vec<BlockRef>,
+    ) -> Loop {
+        let inner = LoopInner { forward_blocks, backward_blocks };
+        Loop(Rc::new(inner))
+    }
+
     pub fn len(&self) -> usize {
-        self.0.blocks.len()
+        self.0.forward_blocks.len() + self.0.backward_blocks.len()
     }
     pub fn provoking_block(&self) -> &BlockRef {
-        self.0.blocks.first().unwrap()
+        self.0.forward_blocks.first().unwrap()
     }
-    pub fn blocks(&self) -> &[BlockRef] {
-        &self.0.blocks
+    pub fn branching_block(&self) -> &BlockRef {
+        self.0.backward_blocks.first().unwrap()
+    }
+    pub fn forward_blocks(&self) -> &[BlockRef] {
+        &self.0.forward_blocks
+    }
+    pub fn backward_blocks(&self) -> &[BlockRef] {
+        &self.0.forward_blocks
+    }
+    pub fn blocks(&self) -> impl Iterator<Item=&BlockRef> {
+        self.forward_blocks().iter()
+            .chain(self.backward_blocks().iter())
     }
     pub fn downgrade(&self) -> LoopRef {
         let out = Rc::downgrade(&self.0);
@@ -49,19 +73,12 @@ impl Loop {
 }
 impl fmt::Debug for Loop {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let blocks = self.blocks.iter()
-            .map(|x| x.upgrade().unwrap())
-            .collect::<Vec<_>>();
         f.write_str(&format!("{} ", make_loop_name(&self.0)))?;
         f.debug_list()
-            .entries(blocks)
+            .entries(self.forward_blocks())
+            .entry(&"[branch]")
+            .entries(self.backward_blocks())
             .finish()
-    }
-}
-impl From<Vec<BlockRef>> for Loop {
-    fn from(blocks: Vec<BlockRef>) -> Self {
-        let inner = LoopInner { blocks };
-        Loop(Rc::new(inner))
     }
 }
 impl PartialEq for Loop {

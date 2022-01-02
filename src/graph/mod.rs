@@ -234,10 +234,10 @@ impl ContextIntermediate {
                         }
                     });
 
-                println!("{:#?}", edges);
+                println!("edges: {:#?}", edges);
 
-                println!("{:?}", diverges);
-                println!("{:?}", converges);
+                println!("diverge blocks: {:#?}", diverges);
+                println!("converge blocks: {:#?}", converges);
 
                 fn find_loop_impl(
                     graph: &Graph,
@@ -245,9 +245,27 @@ impl ContextIntermediate {
                 ) -> bool {
                     let target = stack.iter().next().unwrap().clone();
                     let src = stack.iter().last().unwrap().clone();
+
                     for dst in graph.get_dst_blocks(&src) {
+                        // Check if the current linkage is a back-edge.
+                        let back_dst = stack.iter()
+                            .filter_map(|block| {
+                                if block == dst {
+                                    Some(block.clone())
+                                } else { None }
+                            })
+                            .next();
+                        if let Some(back_dst) = back_dst {
+                            // We only identify the minimal loop. If the back-
+                            // edge points to a block not the same as the stack
+                            // base (which is the diverge block we want to check
+                            // if it starts a minimal loop), we ignore the
+                            // discovery.
+                            return back_dst == target;
+                        }
+
                         stack.push(dst.clone());
-                        if &target == dst || find_loop_impl(graph, stack) {
+                        if find_loop_impl(graph, stack) {
                             return true;
                         }
                         stack.pop();
@@ -260,42 +278,38 @@ impl ContextIntermediate {
                 ) -> Option<Vec<BlockRef>> {
                     let mut stack = vec![src.clone()];
                     if find_loop_impl(graph, &mut stack) {
-                        stack.pop();
                         Some(stack)
                     } else {
                         None
                     }
                 }
 
-                let mut found_loops = HashSet::<Vec<BlockRef>>::new();
-                while let Some(mut min_loop) = diverges.iter()
-                    .filter_map(|diverge| {
-                        if let Some(looop) = find_loop(&graph, diverge) {
-                            if !found_loops.contains(&looop) {
-                                found_loops.insert(looop.clone());
-                                return Some(looop)
-                            }
+                let looop = diverges.iter()
+                    .filter_map(|diverge| find_loop(&graph, diverge))
+                    .filter_map(|mut min_loop| {
+                        if let Some(iconverge) = min_loop.iter()
+                            .position(|x| converges.contains(x))
+                        {
+                            let backward = min_loop.drain(..iconverge)
+                                .collect::<Vec<_>>();
+                            let forward = min_loop;
+                            println!("{:?}-{:?}", forward, backward);
+                            let looop = Loop::new(forward, backward);
+                            Some(looop)
+                        } else {
+                            // If a converge point cannot be found, it's not a
+                            // structured loop. We don't handle such case.
+                            None
                         }
-                        None
                     })
-                    .min_by_key(|x| x.len())
-                {
-                    if let Some(iconverge) = min_loop.iter()
-                        .position(|x| converges.contains(x))
-                    {
-                        let header = min_loop.drain(..iconverge)
-                            .collect::<Vec<_>>();
-                        let select = min_loop.remove(0);
-                        let body = min_loop;
-                        println!("{:?}-{:?}-{:?}", header, select, body);
-                    } else {
-                        // If a converge point cannot be found, it's not a
-                        // structured loop. We don't handle such case.
-                    }
+                    .next();
+
+                let mut found_loops = HashSet::<Loop>::new();
+                if let Some(looop) = looop {
+                    found_loops.insert(looop);
                 }
 
                 let loops: Vec<Loop> = found_loops.into_iter()
-                    .map(Loop::from)
                     .collect();
                 let loop_refs = loops.iter()
                     .map(Loop::downgrade)
