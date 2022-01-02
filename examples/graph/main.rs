@@ -1,9 +1,17 @@
 use std::convert::TryFrom;
 use liella::spv::Spv;
-use liella::spirv::{Context, spv2graph, visit};
+use liella::spirv::{Context, Node, Visitor, spv2graph, elevate_blocks, visit};
 use inline_spirv::inline_spirv;
 #[cfg(not(release))]
 use liella::test_utils::dump_spv;
+
+#[derive(Default)]
+struct DebugVisitor();
+impl Visitor for DebugVisitor {
+    fn visit(&mut self, node: &mut Node) {
+        println!("{:#?}", node);
+    }
+}
 
 fn main() {
     let spv: &'static [u32] = inline_spirv!(r#"
@@ -30,5 +38,6 @@ fn main() {
     let spv = Spv::try_from(spv).unwrap();
     let mut ctxt = Context::new();
     let root = spv2graph(&mut ctxt, spv);
-    visit(root, |node| { println!("{:#?}", node); })
+    elevate_blocks(&mut ctxt, root.clone());
+    visit(root, &mut DebugVisitor::default());
 }
